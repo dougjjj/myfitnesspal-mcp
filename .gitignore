@@ -8,6 +8,12 @@ build/
 .env.*
 !.env.example
 *.db
+*.sqlite
+*.sqlite3
 cookies*
+cookies.json
+token.txt
+*.token
+browser-profile/
 .pytest_cache/
 uv.lock

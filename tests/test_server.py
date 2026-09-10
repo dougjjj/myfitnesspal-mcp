@@ -120,3 +120,33 @@ def test_bulk_export_reads_cache_without_client(local_store):
     )
     assert result["count"] == 1
     assert result["days"][0]["nutrition"]["calories"] == 1500.0
+
+
+def test_assert_writes_allowed_respects_env(monkeypatch):
+    monkeypatch.delenv("MFP_READ_ONLY", raising=False)
+    server.assert_writes_allowed()
+    monkeypatch.setenv("MFP_READ_ONLY", "1")
+    with pytest.raises(RuntimeError, match="MFP_READ_ONLY"):
+        server.assert_writes_allowed()
+    monkeypatch.setenv("MFP_READ_ONLY", "false")
+    server.assert_writes_allowed()
+
+
+def test_write_tools_refuse_when_read_only(local_store, monkeypatch):
+    monkeypatch.setenv("MFP_READ_ONLY", "true")
+    with pytest.raises(RuntimeError, match="MFP_READ_ONLY"):
+        asyncio.run(server.fitness_log_food(query="banana"))
+    with pytest.raises(RuntimeError, match="MFP_READ_ONLY"):
+        asyncio.run(server.fitness_delete_food(query="banana"))
+    with pytest.raises(RuntimeError, match="MFP_READ_ONLY"):
+        asyncio.run(server.fitness_modify_food(query="banana"))
+    with pytest.raises(RuntimeError, match="MFP_READ_ONLY"):
+        asyncio.run(server.fitness_log_weight(weight=80.0))
+    with pytest.raises(RuntimeError, match="MFP_READ_ONLY"):
+        asyncio.run(server.fitness_log_note(text="hi"))
+
+
+def test_log_feel_still_works_when_read_only(local_store, monkeypatch):
+    monkeypatch.setenv("MFP_READ_ONLY", "1")
+    result = server.fitness_log_feel(note="ok", rating=3, date="2026-07-08")
+    assert result["note"] == "ok"

@@ -30,6 +30,12 @@
           "description": "MyFitnessPal username; only needed if MFP's profile lookup fails for your account",
           "isRequired": false,
           "format": "string"
+        },
+        {
+          "name": "MFP_READ_ONLY",
+          "description": "Set to 1 to reject tools that write to MyFitnessPal (recommended for first live use)",
+          "isRequired": false,
+          "format": "string"
         }
       ]
     }

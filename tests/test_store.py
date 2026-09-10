@@ -95,3 +95,11 @@ def test_mark_synced_roundtrip(store):
     assert store.last_synced_on() is None
     store.mark_synced()
     assert store.last_synced_on() is not None
+
+
+def test_database_file_is_owner_only(tmp_path):
+    from myfitnesspal_mcp.store import Store
+
+    path = tmp_path / "secret.db"
+    Store(path)
+    assert path.stat().st_mode & 0o777 == 0o600

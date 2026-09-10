@@ -2,6 +2,12 @@ import argparse
 import logging
 import sys
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def http_bind_is_loopback(host: str) -> bool:
+    return host.strip().lower() in _LOOPBACK_HOSTS
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -30,6 +36,15 @@ def main() -> None:
     from .server import mcp
 
     if args.http:
+        if not http_bind_is_loopback(args.host):
+            print(
+                f"WARNING: HTTP mode has no authentication and is binding to "
+                f"{args.host}:{args.port}. Any client that can reach that "
+                f"address can read and write the connected MyFitnessPal "
+                f"account. Prefer stdio, or bind 127.0.0.1 and put an "
+                f"authenticating proxy in front. See SECURITY_REVIEW.md.",
+                file=sys.stderr,
+            )
         mcp.settings.host = args.host
         mcp.settings.port = args.port
         mcp.run(transport="streamable-http")

@@ -4,7 +4,7 @@ from typing import Any, Callable
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from . import diary, mfp_client, refresh, sync
+from . import config, diary, mfp_client, refresh, sync
 from .store import Store, trend_column
 
 mcp = FastMCP("myfitnesspal")
@@ -70,6 +70,15 @@ async def with_session(ctx: Context, op: Callable[[Store, Any], Any]) -> Any:
     )
 
 
+def assert_writes_allowed() -> None:
+    if config.read_only():
+        raise RuntimeError(
+            "Write tools are disabled because MFP_READ_ONLY is set. "
+            "Unset it only if you accept that the model can change your "
+            "live MyFitnessPal diary. See SECURITY_REVIEW.md."
+        )
+
+
 @mcp.tool()
 async def fitness_get_day(date: str | None = None, ctx: Context = None) -> dict:
     """Nutrition summary, diary entries, the MyFitnessPal daily note, and the
@@ -123,6 +132,7 @@ async def fitness_log_food(
     used as the display name). meal: breakfast|lunch|dinner|snacks.
     date: YYYY-MM-DD (default: today).
     """
+    assert_writes_allowed()
     day = parse_day(date)
 
     def op(store, client):
@@ -149,6 +159,7 @@ async def fitness_delete_food(
     meal: optional breakfast|lunch|dinner|snacks to disambiguate duplicates.
     date: YYYY-MM-DD (default: today).
     """
+    assert_writes_allowed()
     day = parse_day(date)
 
     def op(store, client):
@@ -178,6 +189,7 @@ async def fitness_modify_food(
     new_query: the food to add instead; omit to re-add `query` (e.g. to change
     quantity). meal: breakfast|lunch|dinner|snacks. date: YYYY-MM-DD (default: today).
     """
+    assert_writes_allowed()
     day = parse_day(date)
 
     def op(store, client):
@@ -198,6 +210,7 @@ async def fitness_log_weight(
     Logging twice for the same date updates that day's measurement.
     date: YYYY-MM-DD (default: today).
     """
+    assert_writes_allowed()
     day = parse_day(date)
 
     def op(store, client):
@@ -250,6 +263,7 @@ async def fitness_log_note(
     text: the note body. append: add to the existing note on a new line instead
     of replacing it. date: YYYY-MM-DD (default: today).
     """
+    assert_writes_allowed()
     day = parse_day(date)
 
     def op(store, client):

@@ -10,6 +10,11 @@ Published on PyPI as [`mfp-mcp`](https://pypi.org/project/mfp-mcp/).
 > **Unofficial.** MyFitnessPal has no public API; this reverse-engineers the
 > web app's own endpoints. It can break whenever MFP changes their site. Use at
 > your own risk, with your own account.
+>
+> **Security:** the session cookie is full account access, and the default
+> tools can **write** your real diary. Read [SECURITY_REVIEW.md](SECURITY_REVIEW.md)
+> and complete the must-do checklist before connecting a live account. First
+> run with `MFP_READ_ONLY=1`.
 
 ![quick demo](demo.gif)
 
@@ -70,12 +75,14 @@ session cookie:
 1. Log in at [myfitnesspal.com](https://www.myfitnesspal.com).
 2. Open DevTools (F12) → **Application** (Chrome) or **Storage** (Firefox) →
    **Cookies** → `https://www.myfitnesspal.com`.
-3. Copy the value of `__Secure-next-auth.session-token`.
+3. Copy **only** the value of `__Secure-next-auth.session-token` (that cookie
+   is equivalent to being logged in — treat it like a password).
 4. Paste it into the `mfp-mcp auth` prompt (input is hidden).
 
-Pasting the entire `Cookie:` header from any request in the Network tab also
-works. Cookies are stored with owner-only permissions in your platform config
-dir, or supply them via the `MFP_COOKIE` environment variable instead.
+Do **not** paste a `Cookie:` header copied from another site: every pair is
+stored and sent to MyFitnessPal. Prefer `auth` over putting `MFP_COOKIE` in
+MCP client JSON (those files are often world-readable or cloud-synced).
+Cookies are stored owner-only (`0600`) in your platform config dir.
 
 Sessions last around 30 days. When one expires, either re-run `auth` — or
 enable auto-refresh so you never have to.
@@ -135,18 +142,21 @@ mfp-mcp --http --host 127.0.0.1 --port 8484
 
 This serves streamable HTTP at `/mcp`. **There is no built-in authentication —
 never expose it to the internet.** Bind to localhost and front it with
-something that authenticates for you: a VPN/tailnet (e.g. `tailscale serve`),
-an authenticating reverse proxy, or an OAuth-aware MCP gateway.
+something that authenticates for you: a VPN/tailnet (e.g. `tailscale serve`
+with identity), an authenticating reverse proxy, or an OAuth-aware MCP
+gateway. For a personal diary, prefer stdio. A non-loopback `--host` prints a
+warning; it does not add auth.
 
 ## Configuration
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `MFP_COOKIE` | Session cookie (full header or bare token); overrides the saved file | – |
+| `MFP_COOKIE` | Session cookie (bare token preferred); overrides the saved file. **Do not put this in shared MCP JSON.** | – |
 | `MFP_USERNAME` | Your MFP username (not email); only needed if profile lookup fails | auto-detected |
 | `MFP_IMPERSONATE` | curl_cffi browser fingerprint (try `chrome124` on 403s) | `chrome` |
 | `MFP_SYNC_DAYS` | Gap-fill lookback window in days | `30` |
 | `MFP_MCP_DATA_DIR` | Where the SQLite cache + browser profile live | platform data dir |
+| `MFP_READ_ONLY` | If `1`/`true`, reject tools that write to MyFitnessPal | unset (writes on) |
 
 ## Troubleshooting
 

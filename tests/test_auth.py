@@ -55,3 +55,12 @@ def test_username_env_override(tmp_path, monkeypatch):
     auth.save_cookies({"a": "1"}, username="fromfile")
     monkeypatch.setenv("MFP_USERNAME", "fromenv")
     assert auth.saved_username() == "fromenv"
+
+
+def test_save_cookies_is_owner_only(tmp_path, monkeypatch):
+    path = tmp_path / "cookies.json"
+    path.write_text("{}", encoding="utf-8")
+    path.chmod(0o644)
+    monkeypatch.setattr(auth.config, "cookies_path", lambda: path)
+    auth.save_cookies({"a": "1"})
+    assert path.stat().st_mode & 0o777 == 0o600

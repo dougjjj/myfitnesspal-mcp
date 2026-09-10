@@ -89,6 +89,11 @@ class Store:
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        if str(path) not in {":memory:", ""}:
+            try:
+                Path(path).chmod(0o600)
+            except OSError:
+                pass
 
     def upsert_nutrition(self, day: str, **fields) -> None:
         unknown = set(fields) - set(NUTRITION_FIELDS)

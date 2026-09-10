@@ -1,5 +1,6 @@
 import getpass
 import json
+import os
 import sys
 
 from . import config
@@ -11,8 +12,10 @@ Connect your MyFitnessPal account
 ---------------------------------
 1. Log in at https://www.myfitnesspal.com in your browser.
 2. Open DevTools (F12) -> Application (Chrome) or Storage (Firefox) -> Cookies.
-3. Copy the value of the '__Secure-next-auth.session-token' cookie.
-   (Pasting the entire Cookie header from any request also works.)
+3. Copy ONLY the value of '__Secure-next-auth.session-token'.
+   That cookie is full account access — treat it like a password.
+   Do not paste a full Cookie header from another site (those values
+   would be stored and sent to MyFitnessPal).
 """
 
 
@@ -59,7 +62,11 @@ def save_cookies(cookies: dict[str, str], username: str | None = None) -> None:
     if username:
         saved["username"] = username
     path = config.cookies_path()
-    path.write_text(json.dumps(saved, indent=2))
+    payload = json.dumps(saved, indent=2)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(payload)
+    # Existing files keep their prior mode on O_TRUNC; force owner-only.
     path.chmod(0o600)
 
 
@@ -106,8 +113,9 @@ def run_auth_flow() -> int:
         pasted = ""
     if not pasted.strip():
         print(
-            "No cookie received. Run this in an interactive terminal, or pipe "
-            "the token in: myfitnesspal-mcp auth < token.txt",
+            "No cookie received. Run this in an interactive terminal so the "
+            "paste is hidden. If you must pipe, use a 0600 file and delete it "
+            "afterwards — do not commit token.txt or put MFP_COOKIE in MCP JSON.",
             file=sys.stderr,
         )
         return 1

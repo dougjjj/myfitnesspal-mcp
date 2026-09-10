@@ -15,7 +15,13 @@ def available() -> bool:
 
 
 def profile_dir() -> Path:
-    return config.data_dir() / "browser-profile"
+    path = config.data_dir() / "browser-profile"
+    if path.exists():
+        try:
+            path.chmod(0o700)
+        except OSError:
+            pass
+    return path
 
 
 def profile_seeded() -> bool:
