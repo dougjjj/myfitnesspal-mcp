@@ -121,6 +121,11 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self._migrate()
+        if str(path) not in {":memory:", ""}:
+            try:
+                Path(path).chmod(0o600)
+            except OSError:
+                pass
 
     def _migrate(self) -> None:
         """Bring databases created by older releases up to the current schema."""

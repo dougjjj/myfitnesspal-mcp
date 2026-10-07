@@ -7,7 +7,16 @@ MFP_URL = "https://www.myfitnesspal.com/"
 SETTLE_MS = 4000
 
 
-def available() -> bool:
+def enabled() -> bool:
+    """Headless refresh stays off unless the operator opts in.
+
+    Installing the [autorefresh] extra is not enough: a persistent Chromium
+    profile holds a second copy of the session cookie.
+    """
+    return config.truthy("MFP_AUTOREFRESH")
+
+
+def playwright_installed() -> bool:
     try:
         import playwright.sync_api  # noqa: F401
     except ImportError:
@@ -15,8 +24,18 @@ def available() -> bool:
     return True
 
 
+def available() -> bool:
+    return enabled() and playwright_installed()
+
+
 def profile_dir() -> Path:
-    return config.data_dir() / "browser-profile"
+    path = config.data_dir() / "browser-profile"
+    if path.exists():
+        try:
+            path.chmod(0o700)
+        except OSError:
+            pass
+    return path
 
 
 def profile_seeded() -> bool:
@@ -31,6 +50,7 @@ def _visit_and_harvest(seed_cookies: dict[str, str] | None) -> dict[str, str]:
             str(profile_dir()), headless=True
         )
         try:
+            profile_dir()
             if seed_cookies:
                 context.add_cookies(
                     [

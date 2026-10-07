@@ -9,6 +9,8 @@ build/
 !.env.example
 *.db
 cookies*
+token.txt
+browser-profile/
 .pytest_cache/
 uv.lock
 .mypy_cache/

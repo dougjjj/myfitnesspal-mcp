@@ -33,6 +33,7 @@ def test_save_and_load_roundtrip(tmp_path, monkeypatch):
 
     auth.save_cookies({"a": "1"}, username="tester")
     assert auth.load_cookies() == {"a": "1"}
+    assert (tmp_path / "cookies.json").stat().st_mode & 0o777 == 0o600
     assert auth.saved_username() == "tester"
 
     auth.save_cookies({"a": "2"})
@@ -122,7 +123,8 @@ def test_check_rejected_session_without_auto_refresh(check_env, monkeypatch, cap
 def test_check_rejected_session_with_auto_refresh(check_env, monkeypatch, capsys):
     auth.save_cookies({auth.SESSION_COOKIE: "stale"})
     monkeypatch.setattr(mfp_client, "build_client", reject_session)
-    monkeypatch.setattr(refresh, "available", lambda: True)
+    monkeypatch.setenv("MFP_AUTOREFRESH", "1")
+    monkeypatch.setattr(refresh, "playwright_installed", lambda: True)
     monkeypatch.setattr(refresh, "profile_seeded", lambda: True)
 
     assert auth.run_check() == 1

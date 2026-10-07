@@ -1,15 +1,83 @@
 import asyncio
 import datetime
+import functools
+import inspect
 from collections.abc import Callable
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
 
-from . import diary, food_logging, mfp_client, refresh, sync
+from . import config, diary, food_logging, mfp_client, refresh, sync
 from .food_ranking import MacroTargets
 from .store import Store, trend_column
 
 mcp = FastMCP("myfitnesspal")
+
+_READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
+_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+
+READ_TOOLS = frozenset(
+    {
+        "fitness_get_day",
+        "fitness_search_food",
+        "fitness_list_food_pins",
+        "fitness_get_exercise",
+        "fitness_get_exercise_entries",
+        "fitness_get_note",
+        "fitness_get_trends",
+        "fitness_bulk_export",
+    }
+)
+WRITE_TOOLS = frozenset(
+    {
+        "fitness_draft_food",
+        "fitness_log_food",
+        "fitness_clear_food_pin",
+        "fitness_delete_food",
+        "fitness_modify_food",
+        "fitness_log_weight",
+        "fitness_log_water",
+        "fitness_delete_exercise",
+        "fitness_log_note",
+        "fitness_log_feel",
+    }
+)
+
+
+class ReadOnlyError(RuntimeError):
+    """A write tool was called while writes are disabled."""
+
+
+def assert_writes_allowed() -> None:
+    if not config.writes_allowed():
+        raise ReadOnlyError(
+            "Write tools are disabled. Set MFP_ALLOW_WRITES=1 to let this "
+            "process change MyFitnessPal or local notes. MFP_READ_ONLY=1 "
+            "forces them off. See SECURITY_REVIEW.md."
+        )
+
+
+def write_tool(fn):
+    """Register an MCP tool that cannot run unless writes are opted in."""
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            assert_writes_allowed()
+            return await fn(*args, **kwargs)
+
+    else:
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            assert_writes_allowed()
+            return fn(*args, **kwargs)
+
+    wrapper.__signature__ = inspect.signature(fn)  # type: ignore[attr-defined]
+    wrapper.__mfp_write_tool__ = True  # type: ignore[attr-defined]
+    return mcp.tool(annotations=_WRITE)(wrapper)
+
 
 _store: Store | None = None
 
@@ -86,7 +154,7 @@ async def refresh_after_write(ctx: Context, day: datetime.date) -> dict:
     return {}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def fitness_get_day(date: str | None = None, ctx: Context = None) -> dict:
     """Nutrition summary, diary entries, the MyFitnessPal daily note, and the
     local feel note for a day.
@@ -103,7 +171,7 @@ async def fitness_get_day(date: str | None = None, ctx: Context = None) -> dict:
     return await with_session(ctx, op)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def fitness_search_food(
     query: str, limit: int = 5, with_macros: bool = True, ctx: Context = None
 ) -> dict:
@@ -122,7 +190,7 @@ async def fitness_search_food(
     return await with_session(ctx, op)
 
 
-@mcp.tool()
+@write_tool
 async def fitness_draft_food(
     query: str,
     quantity: float = 1.0,
@@ -172,7 +240,7 @@ async def fitness_draft_food(
     return await with_session(ctx, op)
 
 
-@mcp.tool()
+@write_tool
 async def fitness_log_food(
     query: str | None = None,
     meal: str | None = None,
@@ -260,14 +328,14 @@ async def fitness_log_food(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def fitness_list_food_pins() -> dict:
     """List remembered food choices (query → food and serving) that
     fitness_log_food reuses. Stored locally only."""
     return {"pins": get_store().pins()}
 
 
-@mcp.tool()
+@write_tool
 def fitness_clear_food_pin(query: str | None = None, clear_all: bool = False) -> dict:
     """Forget a remembered food choice for `query`, or every choice with
     clear_all=True, so the next log of that query drafts options again."""
@@ -279,7 +347,7 @@ def fitness_clear_food_pin(query: str | None = None, clear_all: bool = False) ->
     return {"cleared": int(store.clear_pin(query))}
 
 
-@mcp.tool()
+@write_tool
 async def fitness_delete_food(
     query: str, meal: str | None = None, date: str | None = None, ctx: Context = None
 ) -> dict:
@@ -302,7 +370,7 @@ async def fitness_delete_food(
     return {"ok": True, **result, **await refresh_after_write(ctx, day)}
 
 
-@mcp.tool()
+@write_tool
 async def fitness_modify_food(
     query: str,
     new_query: str | None = None,
@@ -352,7 +420,7 @@ async def fitness_modify_food(
     return {"ok": True, **result, **await refresh_after_write(ctx, day)}
 
 
-@mcp.tool()
+@write_tool
 async def fitness_log_weight(
     weight: float, date: str | None = None, ctx: Context = None
 ) -> dict:
@@ -372,7 +440,7 @@ async def fitness_log_weight(
     return await with_session(ctx, op)
 
 
-@mcp.tool()
+@write_tool
 async def fitness_log_water(
     amount: float,
     unit: str = "cup",
@@ -400,7 +468,7 @@ async def fitness_log_water(
     return await with_session(ctx, op)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def fitness_get_exercise(date: str | None = None, ctx: Context = None) -> dict:
     """Read the MyFitnessPal exercise diary (cardio + strength) for a day.
 
@@ -414,7 +482,7 @@ async def fitness_get_exercise(date: str | None = None, ctx: Context = None) -> 
     return await with_session(ctx, op)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def fitness_get_exercise_entries(
     date: str | None = None, ctx: Context = None
 ) -> dict:
@@ -434,7 +502,7 @@ async def fitness_get_exercise_entries(
     return await with_session(ctx, op)
 
 
-@mcp.tool()
+@write_tool
 async def fitness_delete_exercise(
     query: str,
     date: str | None = None,
@@ -461,7 +529,7 @@ async def fitness_delete_exercise(
     return await with_session(ctx, op)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def fitness_get_note(date: str | None = None, ctx: Context = None) -> dict:
     """Read the MyFitnessPal daily diary note (the free-text 'Notes' box at the
     bottom of the day) straight from your account.
@@ -478,7 +546,7 @@ async def fitness_get_note(date: str | None = None, ctx: Context = None) -> dict
     return await with_session(ctx, op)
 
 
-@mcp.tool()
+@write_tool
 async def fitness_log_note(
     text: str, date: str | None = None, append: bool = False, ctx: Context = None
 ) -> dict:
@@ -499,7 +567,7 @@ async def fitness_log_note(
     return await with_session(ctx, op)
 
 
-@mcp.tool()
+@write_tool
 def fitness_log_feel(
     note: str | None = None, rating: int | None = None, date: str | None = None
 ) -> dict:
@@ -512,7 +580,7 @@ def fitness_log_feel(
     return get_store().set_feel(day.isoformat(), note, rating)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def fitness_get_trends(
     metric: str, start: str | None = None, end: str | None = None, ctx: Context = None
 ) -> dict:
@@ -535,7 +603,7 @@ async def fitness_get_trends(
     return await with_session(ctx, op)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def fitness_bulk_export(
     start: str | None = None,
     end: str | None = None,

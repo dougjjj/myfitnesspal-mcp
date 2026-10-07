@@ -92,24 +92,30 @@ This server signs in with your browser's MyFitnessPal session cookie:
 4. Paste it into the `mfp-mcp auth` prompt
 
 Sessions last around 30 days. When one expires, either re-run `auth` or
-enable auto-refresh so you never have to. `mfp-mcp auth --check` reports
-whether the saved session still works and whether auto-refresh is set up,
-without prompting or changing anything.
+opt in to auto-refresh. `mfp-mcp auth --check` reports whether the saved
+session still works and whether auto-refresh is set up, without prompting or
+changing anything.
 
-### Auto-refresh (recommended)
+Paste only `__Secure-next-auth.session-token`. Do not put `MFP_COOKIE` in an
+MCP client JSON file. The server is read-only until you set
+`MFP_ALLOW_WRITES=1`. See [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 
-With the `autorefresh` extra, `auth` also seeds a persistent headless browser
-profile. When MyFitnessPal rejects the session mid-call, the server tells your
-client it is retrying, boots the profile headlessly, lets MyFitnessPal rotate
-the session token, saves the fresh cookie, and retries the call.
+### Auto-refresh (off unless you opt in)
+
+The `autorefresh` extra can seed a persistent headless browser profile, but
+it does nothing until `MFP_AUTOREFRESH=1`. When that is set and MyFitnessPal
+rejects the session mid-call, the server tells your client it is retrying,
+boots the profile headlessly, lets MyFitnessPal rotate the session token,
+saves the fresh cookie, and retries the call. The profile is another copy of
+the session cookie on disk.
 
 ```bash
 uvx --from 'mfp-mcp[autorefresh]' playwright install chromium
-uvx --from 'mfp-mcp[autorefresh]' mfp-mcp auth
+MFP_AUTOREFRESH=1 uvx --from 'mfp-mcp[autorefresh]' mfp-mcp auth
 ```
 
-Then use the same `--from 'mfp-mcp[autorefresh]'` form in your client config
-(e.g. `uvx --from 'mfp-mcp[autorefresh]' mfp-mcp`).
+Then set `MFP_AUTOREFRESH=1` in the client config as well
+(`uvx --from 'mfp-mcp[autorefresh]' mfp-mcp`).
 
 ## Tools
 
@@ -186,26 +192,38 @@ persist the water total.
 
 ## Remote / HTTP mode
 
-The default transport is stdio. For network clients:
+The default transport is stdio. HTTP is off until you pass `--http`, and it
+refuses to start unless `MFP_HTTP_TOKEN` is a secret of at least 16 characters.
+Clients send `Authorization: Bearer <token>`. The default bind is
+`127.0.0.1:8484`, and the Host header must be loopback, which blocks a browser
+on another site from reaching the port via DNS rebinding.
 
 ```bash
-mfp-mcp --http --host 127.0.0.1 --port 8484
+export MFP_HTTP_TOKEN="$(openssl rand -hex 24)"
+mfp-mcp --http
 ```
 
-This serves streamable HTTP at `/mcp`. **There is no built-in authentication —
-never expose it to the internet.** Bind to localhost and front it with
-something that authenticates for you: a VPN/tailnet (e.g. `tailscale serve`),
-an authenticating reverse proxy, or an OAuth-aware MCP gateway.
+Binding any other address also requires `MFP_HTTP_ALLOW_LAN=1`. Binding all
+interfaces (`0.0.0.0`) additionally requires `MFP_HTTP_ALLOWED_HOSTS` set to
+the hostname or IP clients will use. The bearer is sent in cleartext unless
+you terminate TLS in front of the process. Do not publish the port to the
+internet. Write tools stay off unless `MFP_ALLOW_WRITES=1`.
 
 ## Configuration
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `MFP_COOKIE` | Session cookie (full header or bare token); overrides the saved file | – |
+| `MFP_COOKIE` | Session cookie (bare token preferred); overrides the saved file. Do not put this in MCP JSON | – |
 | `MFP_USERNAME` | Your MFP username (not email); only needed if profile lookup fails | auto-detected |
 | `MFP_IMPERSONATE` | curl_cffi browser fingerprint (try `chrome124` on 403s) | `chrome` |
 | `MFP_SYNC_DAYS` | Gap-fill lookback window in days | `30` |
 | `MFP_MCP_DATA_DIR` | Where the SQLite cache + browser profile live | platform data dir |
+| `MFP_ALLOW_WRITES` | Set to `1` to enable diary and local write tools | off |
+| `MFP_READ_ONLY` | Set to `1` to force write tools off | off |
+| `MFP_AUTOREFRESH` | Set to `1` to allow headless session refresh | off |
+| `MFP_HTTP_TOKEN` | Bearer secret required by `--http` (16+ characters) | – |
+| `MFP_HTTP_ALLOW_LAN` | Set to `1` to allow a non-loopback `--host` | off |
+| `MFP_HTTP_ALLOWED_HOSTS` | Hostnames or IPs clients send, required for `--host 0.0.0.0` | – |
 
 ## Troubleshooting
 
@@ -213,7 +231,9 @@ an authenticating reverse proxy, or an OAuth-aware MCP gateway.
   [curl_cffi target](https://github.com/lexiforest/curl_cffi#supported-browsers)).
   Datacenter IPs get challenged far more than residential ones.
 - **"Session expired"**: confirm with `mfp-mcp auth --check`, then re-run
-  `mfp-mcp auth`, or set up [auto-refresh](#auto-refresh-recommended).
+  `mfp-mcp auth`, or set `MFP_AUTOREFRESH=1` and use
+  [auto-refresh](#auto-refresh-off-unless-you-opt-in).
+- **"Write tools are disabled"**: expected unless `MFP_ALLOW_WRITES=1`.
 - **"couldn't read your MyFitnessPal profile"**: MFP's profile endpoint 500s
   for some accounts. Set `MFP_USERNAME` to your username (not your email).
 - **curl_cffi install issues**: prebuilt wheels cover Linux/macOS/Windows;
@@ -250,8 +270,9 @@ needed. Lint and formatting are enforced with `ruff` (`uv run ruff check .`,
 
 Issues and pull requests are welcome, especially endpoint captures when
 MyFitnessPal changes something. See [CONTRIBUTING.md](CONTRIBUTING.md) for
-setup, style, and the PR checklist, and [SECURITY.md](SECURITY.md) for how to
-report vulnerabilities privately. Release history is in
+setup, style, and the PR checklist, [SECURITY.md](SECURITY.md) for how to
+report vulnerabilities privately, and [SECURITY_REVIEW.md](SECURITY_REVIEW.md)
+for the fork's read-only and HTTP posture. Release history is in
 [CHANGELOG.md](CHANGELOG.md).
 
 ## License

@@ -218,6 +218,29 @@ def test_save_draft_purges_expired_drafts(store):
     assert row is None
 
 
+def test_database_file_is_owner_only(tmp_path):
+    from myfitnesspal_mcp.store import Store
+
+    path = tmp_path / "data.db"
+    Store(path)
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_private_data_dir_and_untouched_foreign_dir(tmp_path, monkeypatch):
+    from myfitnesspal_mcp import config
+
+    owned = tmp_path / "myfitnesspal-mcp"
+    monkeypatch.setenv("MFP_MCP_DATA_DIR", str(owned))
+    assert config.data_dir() == owned
+    assert owned.stat().st_mode & 0o777 == 0o700
+
+    foreign = tmp_path / "scratch"
+    foreign.mkdir()
+    foreign.chmod(0o755)
+    config.ensure_private_dir(foreign)
+    assert foreign.stat().st_mode & 0o777 == 0o755
+
+
 def test_existing_database_gains_pin_and_draft_tables(tmp_path):
     from myfitnesspal_mcp.store import Store
 
