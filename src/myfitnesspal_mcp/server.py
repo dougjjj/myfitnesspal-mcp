@@ -2,17 +2,17 @@ import asyncio
 import datetime
 import functools
 import inspect
+import os
 from collections.abc import Callable
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from . import config, diary, food_logging, mfp_client, refresh, sync
 from .food_ranking import MacroTargets
 from .store import Store, trend_column
-
-mcp = FastMCP("myfitnesspal")
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
@@ -43,35 +43,120 @@ WRITE_TOOLS = frozenset(
         "fitness_log_feel",
     }
 )
+# `food` enables diary log/edit/delete. Search stays available because it is
+# a read tool. Draft, pins, feel, water, weight, notes, and exercise stay off.
+FOOD_WRITE_TOOLS = frozenset(
+    {
+        "fitness_log_food",
+        "fitness_delete_food",
+        "fitness_modify_food",
+    }
+)
 
 
 class ReadOnlyError(RuntimeError):
     """A write tool was called while writes are disabled."""
 
 
-def assert_writes_allowed() -> None:
+class UnknownWriteToolsError(ValueError):
+    """MFP_WRITE_TOOLS names a tool this server does not have."""
+
+
+def resolve_write_allowlist(raw: str) -> frozenset[str]:
+    """Write tools named by MFP_WRITE_TOOLS. `food` is the diary group."""
+    enabled: set[str] = set()
+    unknown: list[str] = []
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if token.lower() == "food":
+            enabled.update(FOOD_WRITE_TOOLS)
+            continue
+        if token in WRITE_TOOLS:
+            enabled.add(token)
+            continue
+        if token in READ_TOOLS:
+            continue
+        unknown.append(token)
+    if unknown:
+        known = ", ".join(sorted(WRITE_TOOLS))
+        raise UnknownWriteToolsError(
+            "MFP_WRITE_TOOLS has unknown entries: "
+            + ", ".join(unknown)
+            + f". Known write tools: {known}. Group alias: food "
+            "(fitness_log_food, fitness_delete_food, fitness_modify_food; "
+            "fitness_search_food stays available because it is read-only)."
+        )
+    return frozenset(enabled)
+
+
+def enabled_write_tools() -> frozenset[str]:
+    """Write tools the client may see and call.
+
+    Empty unless MFP_ALLOW_WRITES is set (MFP_READ_ONLY forces that off).
+    An unset or blank MFP_WRITE_TOOLS means every write tool. A set value
+    is an allowlist.
+    """
+    if not config.writes_allowed():
+        return frozenset()
+    raw = os.environ.get("MFP_WRITE_TOOLS")
+    if raw is None or not raw.strip():
+        return WRITE_TOOLS
+    return resolve_write_allowlist(raw)
+
+
+def assert_writes_allowed(tool_name: str) -> None:
     if not config.writes_allowed():
         raise ReadOnlyError(
             "Write tools are disabled. Set MFP_ALLOW_WRITES=1 to let this "
             "process change MyFitnessPal or local notes. MFP_READ_ONLY=1 "
             "forces them off. See SECURITY_REVIEW.md."
         )
+    allowed = enabled_write_tools()
+    if tool_name not in allowed:
+        listed = ", ".join(sorted(allowed)) or "(none)"
+        raise ReadOnlyError(
+            f"{tool_name} is not enabled. MFP_WRITE_TOOLS restricts writes "
+            f"to {listed}. See SECURITY_REVIEW.md."
+        )
+
+
+class _GatedFastMCP(FastMCP):
+    """Hides write tools the allowlist does not enable."""
+
+    async def list_tools(self):
+        allowed = enabled_write_tools()
+        tools = await super().list_tools()
+        return [
+            tool for tool in tools if tool.name in READ_TOOLS or tool.name in allowed
+        ]
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]):
+        allowed = enabled_write_tools()
+        if name not in READ_TOOLS and name not in allowed:
+            raise ToolError(f"Unknown tool: {name}")
+        return await super().call_tool(name, arguments)
+
+
+mcp = _GatedFastMCP("myfitnesspal")
 
 
 def write_tool(fn):
     """Register an MCP tool that cannot run unless writes are opted in."""
+    tool_name = fn.__name__
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
-            assert_writes_allowed()
+            assert_writes_allowed(tool_name)
             return await fn(*args, **kwargs)
 
     else:
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            assert_writes_allowed()
+            assert_writes_allowed(tool_name)
             return fn(*args, **kwargs)
 
     wrapper.__signature__ = inspect.signature(fn)  # type: ignore[attr-defined]

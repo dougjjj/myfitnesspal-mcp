@@ -159,16 +159,27 @@ def run_check() -> int:
 def run_auth_flow() -> int:
     from . import mfp_client, refresh
 
-    print(INSTRUCTIONS, flush=True)
-    try:
-        pasted = read_cookie_paste()
-    except EOFError:
-        pasted = ""
+    env_cookie = config.cookie_env()
+    if env_cookie:
+        print(
+            "Using MFP_COOKIE for this auth command only. It will be written to "
+            f"{config.cookies_path()} with mode 0600. Unset MFP_COOKIE before "
+            "starting the server so the process reads that file.",
+            file=sys.stderr,
+        )
+        pasted = env_cookie
+    else:
+        print(INSTRUCTIONS, flush=True)
+        try:
+            pasted = read_cookie_paste()
+        except EOFError:
+            pasted = ""
     if not pasted.strip():
         print(
-            "No cookie received. Run this in an interactive terminal so the "
-            "paste is hidden. If you must pipe, use a mode 0600 file and delete "
-            "it afterwards. Do not commit token.txt or put MFP_COOKIE in MCP JSON.",
+            "No cookie received. On a headless machine, either pipe the token "
+            "(printf '%s\\n' \"$COOKIE\" | mfp-mcp auth) or run once with "
+            "MFP_COOKIE set. Both write cookies.json with mode 0600. Then unset "
+            "MFP_COOKIE. Do not commit token.txt or put the cookie in MCP JSON.",
             file=sys.stderr,
         )
         return 1

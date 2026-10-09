@@ -91,6 +91,17 @@ This server signs in with your browser's MyFitnessPal session cookie:
 3. Copy the value of `__Secure-next-auth.session-token`
 4. Paste it into the `mfp-mcp auth` prompt
 
+On a headless Linux box, skip the prompt. Either command validates the cookie
+and writes `cookies.json` with mode `0600`. Unset `MFP_COOKIE` afterwards so
+the long-running server reads the file instead of the environment.
+
+```bash
+printf '%s\n' "$COOKIE" | mfp-mcp auth
+# or, once:
+MFP_COOKIE="$COOKIE" mfp-mcp auth
+unset MFP_COOKIE
+```
+
 Sessions last around 30 days. When one expires, either re-run `auth` or
 opt in to auto-refresh. `mfp-mcp auth --check` reports whether the saved
 session still works and whether auto-refresh is set up, without prompting or
@@ -98,7 +109,16 @@ changing anything.
 
 Paste only `__Secure-next-auth.session-token`. Do not put `MFP_COOKIE` in an
 MCP client JSON file. The server is read-only until you set
-`MFP_ALLOW_WRITES=1`. See [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
+`MFP_ALLOW_WRITES=1`. To let an assistant log, edit, and delete food and
+nothing else, set `MFP_WRITE_TOOLS=food` as well. That alias enables
+`fitness_log_food`, `fitness_delete_food`, and `fitness_modify_food`.
+`fitness_search_food` stays available because it is a read tool. Water,
+weight, notes, exercise deletes, and the local feel, pin, and draft tools
+stay off and are not listed. See [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
+
+```bash
+MFP_ALLOW_WRITES=1 MFP_WRITE_TOOLS=food mfp-mcp
+```
 
 ### Auto-refresh (off unless you opt in)
 
@@ -208,6 +228,7 @@ interfaces (`0.0.0.0`) additionally requires `MFP_HTTP_ALLOWED_HOSTS` set to
 the hostname or IP clients will use. The bearer is sent in cleartext unless
 you terminate TLS in front of the process. Do not publish the port to the
 internet. Write tools stay off unless `MFP_ALLOW_WRITES=1`.
+`MFP_WRITE_TOOLS` can narrow that further (for example `food`).
 
 ## Configuration
 
@@ -218,7 +239,8 @@ internet. Write tools stay off unless `MFP_ALLOW_WRITES=1`.
 | `MFP_IMPERSONATE` | curl_cffi browser fingerprint (try `chrome124` on 403s) | `chrome` |
 | `MFP_SYNC_DAYS` | Gap-fill lookback window in days | `30` |
 | `MFP_MCP_DATA_DIR` | Where the SQLite cache + browser profile live | platform data dir |
-| `MFP_ALLOW_WRITES` | Set to `1` to enable diary and local write tools | off |
+| `MFP_ALLOW_WRITES` | Set to `1` to enable write tools. Does nothing while `MFP_READ_ONLY=1` | off |
+| `MFP_WRITE_TOOLS` | With `MFP_ALLOW_WRITES=1`, a comma-separated allowlist of write tool names, or `food` for log/edit/delete. Unset means every write tool | all write tools, once writes are on |
 | `MFP_READ_ONLY` | Set to `1` to force write tools off | off |
 | `MFP_AUTOREFRESH` | Set to `1` to allow headless session refresh | off |
 | `MFP_HTTP_TOKEN` | Bearer secret required by `--http` (16+ characters) | – |
@@ -234,6 +256,7 @@ internet. Write tools stay off unless `MFP_ALLOW_WRITES=1`.
   `mfp-mcp auth`, or set `MFP_AUTOREFRESH=1` and use
   [auto-refresh](#auto-refresh-off-unless-you-opt-in).
 - **"Write tools are disabled"**: expected unless `MFP_ALLOW_WRITES=1`.
+- **"is not enabled"**: `MFP_WRITE_TOOLS` does not name that tool. `food` is log, edit, and delete only.
 - **"couldn't read your MyFitnessPal profile"**: MFP's profile endpoint 500s
   for some accounts. Set `MFP_USERNAME` to your username (not your email).
 - **curl_cffi install issues**: prebuilt wheels cover Linux/macOS/Windows;

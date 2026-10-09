@@ -45,6 +45,41 @@ Leave the process on stdio. Do not pass `--http`. Do not set `MFP_ALLOW_WRITES`.
 
 No `MFP_COOKIE` in that file. Writes stay off because that is now the default. Confirm a log or delete call comes back with `Write tools are disabled`.
 
+Headless cookie save, then unset the variable so the server reads the file:
+
+```bash
+printf '%s\n' "$COOKIE" | mfp-mcp auth
+# or: MFP_COOKIE="$COOKIE" mfp-mcp auth
+unset MFP_COOKIE
+```
+
+Both write `cookies.json` with mode `0600` and do not print the cookie.
+
+### Food logging only (stdio)
+
+Same machine, same cookie file. An assistant may log, edit, and delete foods. Water, weight, notes, exercise deletes, and local feel, pin, and draft tools stay blocked and are not listed. `fitness_search_food` stays, because it is a read.
+
+```bash
+MFP_ALLOW_WRITES=1 MFP_WRITE_TOOLS=food mfp-mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "myfitnesspal": {
+      "command": "uv",
+      "args": ["run", "--directory", "/ABS/PATH/TO/myfitnesspal-mcp", "mfp-mcp"],
+      "env": {
+        "MFP_ALLOW_WRITES": "1",
+        "MFP_WRITE_TOOLS": "food"
+      }
+    }
+  }
+}
+```
+
+`MFP_READ_ONLY=1` still turns every write off. `MFP_WRITE_TOOLS` without `MFP_ALLOW_WRITES=1` does not enable anything.
+
 ### LAN / Unraid
 
 Use this only if the MCP client is on another machine and stdio is impossible.
@@ -195,15 +230,21 @@ None in this server. The only "telemetry" string in the tree is the README note 
 
 ### Write tools and the read-only gate
 
-Off unless `MFP_ALLOW_WRITES` is `1`, `true`, `yes`, or `on`. `MFP_READ_ONLY` set the same way wins.
+Off unless `MFP_ALLOW_WRITES` is `1`, `true`, `yes`, or `on`. `MFP_READ_ONLY` set the same way wins, including over `MFP_WRITE_TOOLS`.
 
-Blocked: `fitness_draft_food`, `fitness_log_food`, `fitness_clear_food_pin`, `fitness_delete_food`, `fitness_modify_food`, `fitness_log_weight`, `fitness_log_water`, `fitness_delete_exercise`, `fitness_log_note`, `fitness_log_feel`.
+`MFP_WRITE_TOOLS` is a comma-separated allowlist, read only when writes are already on. Unset or blank means every write tool. `food` (any case) means `fitness_log_food`, `fitness_delete_food`, and `fitness_modify_food`. `fitness_search_food` is a read tool, so it stays listed either way. You can mix the alias with names (`food, fitness_log_water`). An unknown name makes the server exit 2 before it listens. Tools outside the allowlist are omitted from `tools/list` and `tools/call` answers as an unknown tool. Calling the Python function directly still raises `ReadOnlyError` before any client or store use.
 
-Not blocked: `fitness_get_day`, `fitness_search_food`, `fitness_list_food_pins`, `fitness_get_exercise`, `fitness_get_exercise_entries`, `fitness_get_note`, `fitness_get_trends`, `fitness_bulk_export`.
+Write tools (hidden unless `MFP_ALLOW_WRITES=1` and the allowlist is unset or names them): `fitness_draft_food`, `fitness_log_food`, `fitness_clear_food_pin`, `fitness_delete_food`, `fitness_modify_food`, `fitness_log_weight`, `fitness_log_water`, `fitness_delete_exercise`, `fitness_log_note`, `fitness_log_feel`.
 
-Read tools still fill the local SQLite cache. That is a cache write, not a diary write. `tests/test_read_only.py` calls every write tool with the network client and the store rigged to explode, and expects `ReadOnlyError` first. It also fails if a newly registered tool is missing from one of the two sets.
+Always available (reads): `fitness_get_day`, `fitness_search_food`, `fitness_list_food_pins`, `fitness_get_exercise`, `fitness_get_exercise_entries`, `fitness_get_note`, `fitness_get_trends`, `fitness_bulk_export`.
+
+`fitness_log_food` can still return a draft payload when a query is ambiguous, and it can store a local pin when `pin` is left at its default. The separate `fitness_draft_food` and `fitness_clear_food_pin` tools are not part of `food`.
+
+Read tools still fill the local SQLite cache. That is a cache write, not a diary write. `tests/test_read_only.py` calls every write tool with the network client and the store rigged to explode, and expects `ReadOnlyError` first. It also fails if a newly registered tool is missing from one of the two sets, and it checks the `food` allowlist is the only write surface listed.
 
 The gate is on the MCP tools. Importing `diary.push_food` yourself bypasses it. That is not an MCP path.
+
+Headless cookie setup: `mfp-mcp auth` reads `MFP_COOKIE` when it is set, otherwise one line from stdin when there is no terminal. Either path validates and writes `cookies.json` with mode `0600`. The value is not printed. Unset `MFP_COOKIE` before `mfp-mcp` so the server uses the file.
 
 ### HTTP transport
 
@@ -232,8 +273,9 @@ This was not a vulnerability scan of the resolved set. No advisory database was 
 
 | Change | Behavior |
 | --- | --- |
-| `MFP_ALLOW_WRITES` | Unset: every write tool raises `ReadOnlyError` before it touches MyFitnessPal or the store. |
-| `MFP_READ_ONLY=1` | Forces the gate closed. |
+| `MFP_ALLOW_WRITES` | Unset: every write tool raises `ReadOnlyError` before it touches MyFitnessPal or the store, and those tools are omitted from `tools/list`. |
+| `MFP_WRITE_TOOLS` | With writes on, only the named tools (or the `food` group) are listed and callable. Unset keeps every write tool. |
+| `MFP_READ_ONLY=1` | Forces the gate closed, including when `MFP_WRITE_TOOLS` is set. |
 | stdio | Still the default. Covered by a parser test. |
 | `MFP_HTTP_TOKEN` | Required for `--http`. Compared with `secrets.compare_digest`. Not logged. |
 | Bind | `127.0.0.1` unless `MFP_HTTP_ALLOW_LAN=1`. Wildcard binds need `MFP_HTTP_ALLOWED_HOSTS`. |

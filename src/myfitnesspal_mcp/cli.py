@@ -56,7 +56,13 @@ def main() -> None:
 
         raise SystemExit(run_auth_flow())
 
-    from .server import mcp
+    from .server import UnknownWriteToolsError, enabled_write_tools, mcp
+
+    try:
+        enabled_write_tools()
+    except UnknownWriteToolsError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from exc
 
     if args.http:
         from .http_transport import configure_http

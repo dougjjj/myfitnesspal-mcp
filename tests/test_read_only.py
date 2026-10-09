@@ -32,6 +32,7 @@ WRITE_CALLS = {
 def _read_only_env(monkeypatch):
     monkeypatch.delenv("MFP_ALLOW_WRITES", raising=False)
     monkeypatch.delenv("MFP_READ_ONLY", raising=False)
+    monkeypatch.delenv("MFP_WRITE_TOOLS", raising=False)
 
 
 def test_every_registered_tool_is_classified():
@@ -115,3 +116,98 @@ def test_opt_in_allows_a_local_write(tmp_path, monkeypatch):
     result = server.fitness_log_feel(note="strong", rating=4, date="2026-07-08")
     assert result["note"] == "strong"
     assert store.feel("2026-07-08")["rating"] == 4
+
+
+def _visible_names():
+    tools = asyncio.run(server.mcp.list_tools())
+    return {tool.name for tool in tools}
+
+
+def test_hidden_writes_are_not_listed_by_default():
+    assert _visible_names() == set(server.READ_TOOLS)
+
+
+def test_unset_allowlist_lists_every_write_tool(monkeypatch):
+    monkeypatch.setenv("MFP_ALLOW_WRITES", "1")
+    assert _visible_names() == set(server.READ_TOOLS | server.WRITE_TOOLS)
+
+
+def test_food_alias_enables_only_diary_writes(monkeypatch):
+    monkeypatch.setenv("MFP_ALLOW_WRITES", "1")
+    monkeypatch.setenv("MFP_WRITE_TOOLS", " food ")
+    assert server.enabled_write_tools() == server.FOOD_WRITE_TOOLS
+    assert _visible_names() == set(server.READ_TOOLS | server.FOOD_WRITE_TOOLS)
+    assert "fitness_search_food" in _visible_names()
+    for blocked in (
+        "fitness_draft_food",
+        "fitness_clear_food_pin",
+        "fitness_log_feel",
+        "fitness_log_water",
+        "fitness_log_weight",
+        "fitness_log_note",
+        "fitness_delete_exercise",
+    ):
+        assert blocked not in _visible_names()
+
+
+def test_food_alias_blocks_other_writes_before_side_effects(monkeypatch):
+    monkeypatch.setenv("MFP_ALLOW_WRITES", "1")
+    monkeypatch.setenv("MFP_WRITE_TOOLS", "food")
+
+    def boom(*args, **kwargs):
+        raise AssertionError("blocked write tool ran past the allowlist")
+
+    monkeypatch.setattr(server.mfp_client, "get_client", boom)
+    monkeypatch.setattr(server, "get_store", boom)
+
+    for name in server.WRITE_TOOLS - server.FOOD_WRITE_TOOLS:
+        with pytest.raises(server.ReadOnlyError, match="MFP_WRITE_TOOLS"):
+            _call(name, WRITE_CALLS[name])
+        with pytest.raises(server.ToolError, match="Unknown tool"):
+            asyncio.run(server.mcp.call_tool(name, {}))
+
+    for name in server.FOOD_WRITE_TOOLS:
+        with pytest.raises(AssertionError, match="past the allowlist"):
+            _call(name, WRITE_CALLS[name])
+
+
+def test_explicit_names_and_food_can_be_combined(monkeypatch):
+    monkeypatch.setenv("MFP_ALLOW_WRITES", "1")
+    monkeypatch.setenv("MFP_WRITE_TOOLS", "food, fitness_log_water")
+    assert server.enabled_write_tools() == server.FOOD_WRITE_TOOLS | {
+        "fitness_log_water"
+    }
+
+
+def test_write_tools_without_allow_writes_does_not_enable(monkeypatch):
+    monkeypatch.setenv("MFP_WRITE_TOOLS", "food")
+    assert server.enabled_write_tools() == frozenset()
+    assert _visible_names() == set(server.READ_TOOLS)
+
+
+def test_read_only_overrides_food_allowlist(monkeypatch):
+    monkeypatch.setenv("MFP_ALLOW_WRITES", "1")
+    monkeypatch.setenv("MFP_WRITE_TOOLS", "food")
+    monkeypatch.setenv("MFP_READ_ONLY", "1")
+    assert server.enabled_write_tools() == frozenset()
+    with pytest.raises(server.ReadOnlyError, match="MFP_ALLOW_WRITES"):
+        _call("fitness_log_food", WRITE_CALLS["fitness_log_food"])
+    assert "fitness_log_food" not in _visible_names()
+
+
+def test_unknown_write_tool_name_is_rejected(monkeypatch):
+    monkeypatch.setenv("MFP_ALLOW_WRITES", "1")
+    monkeypatch.setenv("MFP_WRITE_TOOLS", "fitness_log_foods")
+    with pytest.raises(server.UnknownWriteToolsError, match="fitness_log_foods"):
+        server.enabled_write_tools()
+
+
+def test_cli_rejects_unknown_write_tool(monkeypatch):
+    from myfitnesspal_mcp import cli
+
+    monkeypatch.setenv("MFP_ALLOW_WRITES", "1")
+    monkeypatch.setenv("MFP_WRITE_TOOLS", "nope")
+    monkeypatch.setattr("sys.argv", ["mfp-mcp"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    assert exit_info.value.code == 2
