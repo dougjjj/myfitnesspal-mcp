@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- Write tools are off unless `MFP_ALLOW_WRITES=1`. `MFP_READ_ONLY=1` forces
+  them off. This covers food, water, weight, notes, exercise deletes, and the
+  local feel-note, pin, and draft tools.
+- `MFP_WRITE_TOOLS` narrows that opt-in. `food` enables only
+  `fitness_log_food`, `fitness_delete_food`, and `fitness_modify_food`.
+  Other write tools are not listed to the client. Unset, every write tool
+  stays available once `MFP_ALLOW_WRITES=1`.
+- `mfp-mcp auth` can take the session cookie from `MFP_COOKIE` or from stdin
+  on a headless machine and writes `cookies.json` with mode `0600`.
+- `--http` still defaults to `127.0.0.1` and now refuses to start without
+  `MFP_HTTP_TOKEN`. Binding any other address also requires
+  `MFP_HTTP_ALLOW_LAN=1` and a Host allowlist (`MFP_HTTP_ALLOWED_HOSTS` when
+  binding all interfaces).
+- Headless auto-refresh stays off unless `MFP_AUTOREFRESH=1`, even when the
+  `[autorefresh]` extra is installed.
+- New config and data directories are mode `0700`. `cookies.json` is created
+  mode `0600`. The SQLite file is mode `0600`.
+
 ## [0.4.1] - 2026-09-30
 
 ### Added

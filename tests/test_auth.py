@@ -1,3 +1,4 @@
+import io
 import json
 import sys
 
@@ -33,6 +34,7 @@ def test_save_and_load_roundtrip(tmp_path, monkeypatch):
 
     auth.save_cookies({"a": "1"}, username="tester")
     assert auth.load_cookies() == {"a": "1"}
+    assert (tmp_path / "cookies.json").stat().st_mode & 0o777 == 0o600
     assert auth.saved_username() == "tester"
 
     auth.save_cookies({"a": "2"})
@@ -122,7 +124,8 @@ def test_check_rejected_session_without_auto_refresh(check_env, monkeypatch, cap
 def test_check_rejected_session_with_auto_refresh(check_env, monkeypatch, capsys):
     auth.save_cookies({auth.SESSION_COOKIE: "stale"})
     monkeypatch.setattr(mfp_client, "build_client", reject_session)
-    monkeypatch.setattr(refresh, "available", lambda: True)
+    monkeypatch.setenv("MFP_AUTOREFRESH", "1")
+    monkeypatch.setattr(refresh, "playwright_installed", lambda: True)
     monkeypatch.setattr(refresh, "profile_seeded", lambda: True)
 
     assert auth.run_check() == 1
@@ -136,6 +139,41 @@ def test_check_flag_requires_auth_command(monkeypatch):
     with pytest.raises(SystemExit) as exit_info:
         cli.main()
     assert exit_info.value.code == 2
+
+
+def test_auth_from_env_writes_private_cookie_file(check_env, monkeypatch, capsys):
+    monkeypatch.setenv("MFP_COOKIE", "headless-token")
+    monkeypatch.setattr(
+        mfp_client, "build_client", lambda cookies: FakeConnectedClient()
+    )
+    monkeypatch.setattr(mfp_client, "reset", lambda: None)
+    monkeypatch.setattr(refresh, "enabled", lambda: False)
+
+    assert auth.run_auth_flow() == 0
+    saved = json.loads(check_env.read_text())
+    assert saved["cookies"] == {auth.SESSION_COOKIE: "headless-token"}
+    assert saved["username"] == "tester"
+    assert check_env.stat().st_mode & 0o777 == 0o600
+    captured = capsys.readouterr()
+    assert "headless-token" not in captured.out
+    assert "headless-token" not in captured.err
+    assert "0600" in captured.err
+
+
+def test_auth_from_stdin_writes_private_cookie_file(check_env, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("stdin-token\n"))
+    monkeypatch.setattr(
+        mfp_client, "build_client", lambda cookies: FakeConnectedClient()
+    )
+    monkeypatch.setattr(mfp_client, "reset", lambda: None)
+    monkeypatch.setattr(refresh, "enabled", lambda: False)
+
+    assert auth.run_auth_flow() == 0
+    saved = json.loads(check_env.read_text())
+    assert saved["cookies"] == {auth.SESSION_COOKIE: "stdin-token"}
+    captured = capsys.readouterr()
+    assert "stdin-token" not in captured.out
+    assert "stdin-token" not in captured.err
 
 
 def test_username_env_override(tmp_path, monkeypatch):

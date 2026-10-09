@@ -1,5 +1,6 @@
 import getpass
 import json
+import os
 import sys
 
 from . import config
@@ -11,8 +12,9 @@ Connect your MyFitnessPal account
 ---------------------------------
 1. Log in at https://www.myfitnesspal.com in your browser.
 2. Open DevTools (F12) -> Application (Chrome) or Storage (Firefox) -> Cookies.
-3. Copy the value of the '__Secure-next-auth.session-token' cookie.
-   (Pasting the entire Cookie header from any request also works.)
+3. Copy ONLY the value of '__Secure-next-auth.session-token'.
+   That cookie is full access to the account. Do not paste a full Cookie
+   header, and do not put the value in an MCP client JSON file.
 """
 
 
@@ -59,7 +61,11 @@ def save_cookies(cookies: dict[str, str], username: str | None = None) -> None:
     if username:
         saved["username"] = username
     path = config.cookies_path()
-    path.write_text(json.dumps(saved, indent=2))
+    payload = json.dumps(saved, indent=2)
+    # O_CREAT with 0600 so the file is never briefly world-readable.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(payload)
     path.chmod(0o600)
 
 
@@ -107,10 +113,15 @@ def session_source() -> str | None:
 def auto_refresh_status() -> tuple[bool, str]:
     from . import refresh
 
-    if not refresh.available():
-        return False, "off (install the [autorefresh] extra, then run auth again)"
+    if not refresh.enabled():
+        return (
+            False,
+            "off (set MFP_AUTOREFRESH=1 to allow the headless-browser extra)",
+        )
+    if not refresh.playwright_installed():
+        return False, "requested, but the [autorefresh] extra is not installed"
     if not refresh.profile_seeded():
-        return False, "installed, but no browser profile yet (run auth again)"
+        return False, "enabled, but no browser profile yet (run auth again)"
     return True, f"ready (profile at {refresh.profile_dir()})"
 
 
@@ -148,15 +159,27 @@ def run_check() -> int:
 def run_auth_flow() -> int:
     from . import mfp_client, refresh
 
-    print(INSTRUCTIONS, flush=True)
-    try:
-        pasted = read_cookie_paste()
-    except EOFError:
-        pasted = ""
+    env_cookie = config.cookie_env()
+    if env_cookie:
+        print(
+            "Using MFP_COOKIE for this auth command only. It will be written to "
+            f"{config.cookies_path()} with mode 0600. Unset MFP_COOKIE before "
+            "starting the server so the process reads that file.",
+            file=sys.stderr,
+        )
+        pasted = env_cookie
+    else:
+        print(INSTRUCTIONS, flush=True)
+        try:
+            pasted = read_cookie_paste()
+        except EOFError:
+            pasted = ""
     if not pasted.strip():
         print(
-            "No cookie received. Run this in an interactive terminal, or pipe "
-            "the token in: myfitnesspal-mcp auth < token.txt",
+            "No cookie received. On a headless machine, either pipe the token "
+            "(printf '%s\\n' \"$COOKIE\" | mfp-mcp auth) or run once with "
+            "MFP_COOKIE set. Both write cookies.json with mode 0600. Then unset "
+            "MFP_COOKIE. Do not commit token.txt or put the cookie in MCP JSON.",
             file=sys.stderr,
         )
         return 1
@@ -193,9 +216,15 @@ def run_auth_flow() -> int:
             print(
                 "The server still works; sessions just need a manual re-auth when they expire."
             )
+    elif refresh.enabled():
+        print(
+            "MFP_AUTOREFRESH is set, but the [autorefresh] extra is not installed. "
+            "Sessions need a manual re-auth when they expire."
+        )
     else:
         print(
-            "Optional: install with the [autorefresh] extra and run auth again to "
-            "enable automatic session refresh via a headless browser."
+            "Auto-refresh is off. Set MFP_AUTOREFRESH=1 and install the "
+            "[autorefresh] extra only if you want a headless browser to renew "
+            "the session. Otherwise re-run auth when it expires."
         )
     return 0

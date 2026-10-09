@@ -78,6 +78,14 @@ def test_run_with_refresh_does_not_retry_other_errors(monkeypatch):
     assert ctx.messages == []
 
 
+@pytest.fixture(autouse=True)
+def _writes_opted_in(monkeypatch):
+    """These tests exercise tool behavior. The read-only gate has its own file."""
+    monkeypatch.delenv("MFP_READ_ONLY", raising=False)
+    monkeypatch.delenv("MFP_WRITE_TOOLS", raising=False)
+    monkeypatch.setenv("MFP_ALLOW_WRITES", "1")
+
+
 @pytest.fixture
 def local_store(tmp_path, monkeypatch):
     test_store = Store(tmp_path / "server.db")

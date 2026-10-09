@@ -30,6 +30,31 @@
           "description": "MyFitnessPal username; only needed if MFP's profile lookup fails for your account",
           "isRequired": false,
           "format": "string"
+        },
+        {
+          "name": "MFP_ALLOW_WRITES",
+          "description": "Set to 1 to enable diary write tools. Unset, the server is read-only. Do not put the session cookie in this file.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "MFP_WRITE_TOOLS",
+          "description": "With MFP_ALLOW_WRITES=1, comma-separated write tool names to enable, or 'food' for log/edit/delete only. Unset enables every write tool.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "MFP_AUTOREFRESH",
+          "description": "Set to 1 to allow the optional headless-browser session refresh. Off by default.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "MFP_HTTP_TOKEN",
+          "description": "Required only for --http. Shared bearer secret of at least 16 characters.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
         }
       ]
     }

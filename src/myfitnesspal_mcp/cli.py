@@ -3,7 +3,7 @@ import logging
 import sys
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="myfitnesspal-mcp",
         description="MCP server for MyFitnessPal (stdio by default).",
@@ -23,7 +23,10 @@ def main() -> None:
     parser.add_argument(
         "--http",
         action="store_true",
-        help="serve over streamable HTTP instead of stdio",
+        help=(
+            "serve over streamable HTTP instead of stdio. Requires "
+            "MFP_HTTP_TOKEN. Binds 127.0.0.1 unless MFP_HTTP_ALLOW_LAN=1"
+        ),
     )
     parser.add_argument(
         "--host", default="127.0.0.1", help="HTTP bind host (default 127.0.0.1)"
@@ -31,6 +34,11 @@ def main() -> None:
     parser.add_argument(
         "--port", type=int, default=8484, help="HTTP port (default 8484)"
     )
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.check and args.command != "auth":
@@ -48,11 +56,18 @@ def main() -> None:
 
         raise SystemExit(run_auth_flow())
 
-    from .server import mcp
+    from .server import UnknownWriteToolsError, enabled_write_tools, mcp
+
+    try:
+        enabled_write_tools()
+    except UnknownWriteToolsError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from exc
 
     if args.http:
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
+        from .http_transport import configure_http
+
+        configure_http(mcp, args.host, args.port)
         mcp.run(transport="streamable-http")
     else:
         mcp.run()
