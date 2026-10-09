@@ -111,14 +111,13 @@ def assert_writes_allowed(tool_name: str) -> None:
         raise ReadOnlyError(
             "Write tools are disabled. Set MFP_ALLOW_WRITES=1 to let this "
             "process change MyFitnessPal or local notes. MFP_READ_ONLY=1 "
-            "forces them off. See SECURITY_REVIEW.md."
+            "forces them off."
         )
     allowed = enabled_write_tools()
     if tool_name not in allowed:
         listed = ", ".join(sorted(allowed)) or "(none)"
         raise ReadOnlyError(
-            f"{tool_name} is not enabled. MFP_WRITE_TOOLS restricts writes "
-            f"to {listed}. See SECURITY_REVIEW.md."
+            f"{tool_name} is not enabled. MFP_WRITE_TOOLS restricts writes to {listed}."
         )
 
 

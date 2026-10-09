@@ -114,7 +114,7 @@ nothing else, set `MFP_WRITE_TOOLS=food` as well. That alias enables
 `fitness_log_food`, `fitness_delete_food`, and `fitness_modify_food`.
 `fitness_search_food` stays available because it is a read tool. Water,
 weight, notes, exercise deletes, and the local feel, pin, and draft tools
-stay off and are not listed. See [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
+stay off and are not listed.
 
 ```bash
 MFP_ALLOW_WRITES=1 MFP_WRITE_TOOLS=food mfp-mcp
@@ -293,9 +293,8 @@ needed. Lint and formatting are enforced with `ruff` (`uv run ruff check .`,
 
 Issues and pull requests are welcome, especially endpoint captures when
 MyFitnessPal changes something. See [CONTRIBUTING.md](CONTRIBUTING.md) for
-setup, style, and the PR checklist, [SECURITY.md](SECURITY.md) for how to
-report vulnerabilities privately, and [SECURITY_REVIEW.md](SECURITY_REVIEW.md)
-for the fork's read-only and HTTP posture. Release history is in
+setup, style, and the PR checklist, and [SECURITY.md](SECURITY.md) for how to
+report vulnerabilities privately. Release history is in
 [CHANGELOG.md](CHANGELOG.md).
 
 ## License
