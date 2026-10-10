@@ -28,6 +28,22 @@ All notable changes to this project are documented here. The format follows
   recipe logs that many servings). Several personal matches return a draft
   with `personal_matches` and log nothing. A single exact public name is
   used only when nothing personal matches.
+- Search, find, the recent and frequent lists, and a query log or edit that
+  had to read those tabs may include `warnings` when a tab does not respond.
+  Callers that ignore unknown fields keep working.
+
+### Fixed
+
+- `fitness_log_food(recipe_id=...)` submits the recipe through MyFitnessPal's
+  recipe logger (`POST /recipe/log_recipe`) using the recipe object on the
+  view page. A recipe with no food id can be logged. `quantity` is still how
+  many servings to add, and the diary still gets one line.
+- Recent and frequent food lookups give up after 8 seconds.
+  `fitness_find_food`, `fitness_search_food`, `fitness_list_recent_foods`,
+  and `fitness_list_frequent_foods` return the other results with a
+  `warnings` field naming the endpoint that did not respond.
+- A recipe list includes calories, macros, and `recipe_servings` when that
+  list page already includes them. Listing recipes does not open each one.
 
 ### Security
 

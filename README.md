@@ -148,9 +148,9 @@ Then set `MFP_AUTOREFRESH=1` in the client config as well
 | `fitness_find_food` | Same search as `fitness_search_food` |
 | `fitness_list_my_foods` | Foods you created, with calories, macros, servings, and ids |
 | `fitness_list_my_meals` | Saved meals and each food in them |
-| `fitness_list_my_recipes` | Your recipes, with servings and the ids used to log them |
-| `fitness_list_recent_foods` | Recent foods from the add-food tabs, including the last serving count |
-| `fitness_list_frequent_foods` | Frequent foods from the add-food tabs |
+| `fitness_list_my_recipes` | Your recipes. Calories and macros are included when the list page already shows them |
+| `fitness_list_recent_foods` | Recent foods from the add-food tabs, including the last serving count. An empty list plus `warnings` means that tab did not respond |
+| `fitness_list_frequent_foods` | Frequent foods from the add-food tabs. Same `warnings` behaviour as recent foods |
 | `fitness_draft_food` | Numbered options with every serving size, filtered/ranked by optional calorie and macro targets |
 | `fitness_log_food` | Log a draft option, a My Food, a recipe, a saved meal, a remembered food, or exact ids |
 | `fitness_list_food_pins` | Remembered query → food/serving choices (local) |
@@ -198,7 +198,7 @@ Log a known personal id without searching:
 
 - `fitness_log_food(my_food_id=..., quantity=2)` logs that My Food.
 - `fitness_log_food(recipe_id=..., quantity=2)` logs two servings of the
-  recipe as one diary line.
+  recipe as one diary line, through the same recipe logger the website uses.
 - `fitness_log_food(saved_meal_id=..., quantity=1)` logs every food in the
   saved meal. `quantity` multiplies each food's own quantity (a tea saved as
   2 servings is logged as 2). `meal` is still the diary section, such as
