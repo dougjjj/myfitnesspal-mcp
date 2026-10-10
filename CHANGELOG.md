@@ -16,6 +16,11 @@ All notable changes to this project are documented here. The format follows
 - `fitness_log_food` accepts `my_food_id`, `recipe_id` (quantity is servings
   of the recipe, one diary line), and `saved_meal_id` (logs every food in
   the meal). Saved-meal logging stays in the `food` write group.
+- `mfp-mcp keepalive` opens the seeded browser profile, requests
+  `GET /api/auth/session` and `GET /user/auth_token?refresh=true`, and
+  writes the rotated cookie to `cookies.json` (mode `0600`).
+  `keepalive --loop --interval 20m` repeats until the session is dead.
+  A dead session exits non-zero and leaves the saved cookie in place.
 
 ### Changed
 
@@ -31,6 +36,9 @@ All notable changes to this project are documented here. The format follows
 - Search, find, the recent and frequent lists, and a query log or edit that
   had to read those tabs may include `warnings` when a tab does not respond.
   Callers that ignore unknown fields keep working.
+- A running server re-reads `cookies.json` when the file's modification
+  time changes, so `mfp-mcp keepalive` in another process updates the next
+  tool call. `MFP_COOKIE`, when set, still overrides the file.
 
 ### Fixed
 
@@ -44,6 +52,11 @@ All notable changes to this project are documented here. The format follows
   `warnings` field naming the endpoint that did not respond.
 - A recipe list includes calories, macros, and `recipe_servings` when that
   list page already includes them. Listing recipes does not open each one.
+- Headless refresh requests the session poll and `/user/auth_token?refresh=true`
+  instead of the homepage. The homepage visit did not wait for the website's
+  120-second session poll, so it did not roll the cookie. When `cookies.json`
+  is newer than the loaded client, refresh re-reads the file and does not
+  overwrite it with a browser harvest.
 
 ### Security
 

@@ -121,24 +121,54 @@ def build_client(
 
 
 _client: CurlCffiClient | None = None
+_loaded_cookie_mtime_ns: int | None = None
+
+
+def cookie_mtime_ns() -> int | None:
+    path = config.cookies_path()
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def loaded_client_cookie_file_changed() -> bool:
+    """True when cookies.json was rewritten after the cached client was built.
+
+    MFP_COOKIE overrides the file, so a rewrite is ignored while it is set.
+    """
+    if _client is None or config.cookie_env():
+        return False
+    return cookie_mtime_ns() != _loaded_cookie_mtime_ns
 
 
 def get_client() -> CurlCffiClient:
-    global _client
-    if _client is not None:
+    global _client, _loaded_cookie_mtime_ns
+    if _client is not None and not loaded_client_cookie_file_changed():
         return _client
+    # Capture mtime before the exchange. A keepalive that writes the file
+    # while this call is in flight then disagrees with this stamp, so the
+    # next call loads the new cookie.
+    mtime = None if config.cookie_env() else cookie_mtime_ns()
     cookies = auth.load_cookies()
     if not cookies:
+        _client = None
+        _loaded_cookie_mtime_ns = None
         raise NotConnectedError(RECONNECT_HINT)
     try:
-        _client = build_client(cookies)
+        client = build_client(cookies)
     except NotConnectedError:
         raise
     except Exception as exc:
+        _client = None
+        _loaded_cookie_mtime_ns = None
         raise NotConnectedError(f"{RECONNECT_HINT} (auth failed: {exc})") from exc
+    _client = client
+    _loaded_cookie_mtime_ns = mtime
     return _client
 
 
 def reset() -> None:
-    global _client
+    global _client, _loaded_cookie_mtime_ns
     _client = None
+    _loaded_cookie_mtime_ns = None

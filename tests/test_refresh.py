@@ -1,3 +1,5 @@
+import json
+import os
 import threading
 
 import pytest
@@ -80,6 +82,72 @@ def test_later_refresh_runs_again(seeded_browser, monkeypatch):
     refresh.refresh_session()
     refresh.refresh_session()
     assert len(browser_launches) == 2
+
+
+def test_refresh_rereads_a_newer_cookie_file_without_a_browser(tmp_path, monkeypatch):
+    path = tmp_path / "cookies.json"
+    monkeypatch.setattr(auth.config, "cookies_path", lambda: path)
+    monkeypatch.setattr(refresh.mfp_client.config, "cookies_path", lambda: path)
+    monkeypatch.delenv("MFP_COOKIE", raising=False)
+    launched = []
+
+    def build(cookies, username=None, impersonate=None):
+        return {"cookies": dict(cookies)}
+
+    monkeypatch.setattr(refresh.mfp_client, "build_client", build)
+    refresh.mfp_client.reset()
+    try:
+        auth.save_cookies({auth.SESSION_COOKIE: "session-old"})
+        refresh.mfp_client.get_client()
+        auth.save_cookies({auth.SESSION_COOKIE: "from-keepalive"})
+        later = path.stat().st_mtime + 2
+        os.utime(path, (later, later))
+        monkeypatch.setattr(
+            refresh,
+            "_visit_and_harvest",
+            lambda seed: launched.append(seed) or {},
+        )
+        monkeypatch.setattr(refresh, "available", lambda: True)
+        monkeypatch.setattr(refresh, "profile_seeded", lambda: True)
+        refresh.refresh_session()
+        assert launched == []
+        loaded = refresh.mfp_client.get_client()
+        assert loaded["cookies"][auth.SESSION_COOKIE] == "from-keepalive"
+    finally:
+        refresh.mfp_client.reset()
+
+
+def test_refresh_does_not_overwrite_a_cookie_file_written_during_the_visit(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "cookies.json"
+    monkeypatch.setattr(auth.config, "cookies_path", lambda: path)
+    monkeypatch.setattr(refresh.mfp_client.config, "cookies_path", lambda: path)
+    monkeypatch.delenv("MFP_COOKIE", raising=False)
+
+    def build(cookies, username=None, impersonate=None):
+        return {"cookies": dict(cookies)}
+
+    monkeypatch.setattr(refresh.mfp_client, "build_client", build)
+    refresh.mfp_client.reset()
+    try:
+        auth.save_cookies({auth.SESSION_COOKIE: "session-old"})
+        refresh.mfp_client.get_client()
+
+        def harvest(seed):
+            auth.save_cookies({auth.SESSION_COOKIE: "from-keepalive"})
+            later = path.stat().st_mtime + 2
+            os.utime(path, (later, later))
+            return {auth.SESSION_COOKIE: "from-browser"}
+
+        monkeypatch.setattr(refresh, "_visit_and_harvest", harvest)
+        monkeypatch.setattr(refresh, "available", lambda: True)
+        monkeypatch.setattr(refresh, "profile_seeded", lambda: True)
+        refresh.refresh_session()
+        saved = json.loads(path.read_text())
+        assert saved["cookies"][auth.SESSION_COOKIE] == "from-keepalive"
+    finally:
+        refresh.mfp_client.reset()
 
 
 def test_failed_refresh_does_not_block_later_ones(seeded_browser, monkeypatch):
