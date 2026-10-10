@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `fitness_list_my_foods`, `fitness_list_my_meals`, `fitness_list_my_recipes`,
+  `fitness_list_recent_foods`, and `fitness_list_frequent_foods` read the
+  user's MyFitnessPal library. Each item includes name, calories, macros,
+  servings, and the ids needed to log it.
+- `fitness_find_food` searches that library before the public database.
+- `fitness_log_food` accepts `my_food_id`, `recipe_id` (quantity is servings
+  of the recipe, one diary line), and `saved_meal_id` (logs every food in
+  the meal). Saved-meal logging stays in the `food` write group.
+
+### Changed
+
+- `fitness_search_food` checks My Foods, saved meals, recipes, recent foods,
+  and frequent foods before the public database. Each result has `source`
+  (`my_food`, `my_meal`, `my_recipe`, `recent`, `frequent`, or `public`).
+  Personal hits rank first. `fitness_find_food` returns the same results.
+- `fitness_log_food(query=...)` prefers a remembered pin, then an exact or
+  unique close match from those personal sources (a meal logs every item; a
+  recipe logs that many servings). Several personal matches return a draft
+  with `personal_matches` and log nothing. A single exact public name is
+  used only when nothing personal matches.
+
 ### Security
 
 - Write tools are off unless `MFP_ALLOW_WRITES=1`. `MFP_READ_ONLY=1` forces

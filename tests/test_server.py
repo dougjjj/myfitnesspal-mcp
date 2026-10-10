@@ -151,7 +151,14 @@ def test_log_food_ambiguous_query_returns_choices(connected):
     result = asyncio.run(server.fitness_log_food(query="bread"))
     assert result["ok"] is True
     assert result["needs_choice"] is True
-    assert not any(call[0] == "POST" for call in connected.session.calls)
+    assert not any(
+        call[0] == "POST"
+        and (
+            call[1].split("?", 1)[0].rstrip("/").endswith("/food/add")
+            or call[1].split("?", 1)[0].rstrip("/").endswith("/api/services/diary")
+        )
+        for call in connected.session.calls
+    )
 
 
 def test_log_food_with_explicit_ids(connected):

@@ -1,0 +1,51 @@
+{
+  "items": [
+    {
+      "type": "food_entry",
+      "date": "2026-10-01",
+      "meal_id": 0,
+      "quantity": 2,
+      "food": {
+        "id": "tea-1",
+        "version": "tea-v1",
+        "brand_name": "",
+        "description": "English Breakfast Tea with Milk",
+        "public": false,
+        "nutritional_contents": {
+          "energy": {"value": 6},
+          "protein": 0.2,
+          "carbohydrates": 1,
+          "fat": 0.1
+        }
+      },
+      "weight": {
+        "id": "w-tea",
+        "unit": "serving",
+        "value": 1,
+        "nutrition_multiplier": 1
+      }
+    },
+    {
+      "type": "food_entry",
+      "quantity": 1,
+      "food": {
+        "id": "syrup-1",
+        "version": "syrup-v1",
+        "description": "Pancake syrup",
+        "brand_name": "",
+        "nutritional_contents": {
+          "energy": {"value": 50},
+          "protein": 0,
+          "carbohydrates": 13,
+          "fat": 0
+        }
+      },
+      "weight": {
+        "id": "w-syrup",
+        "unit": "tablespoon",
+        "value": 1,
+        "nutrition_multiplier": 1
+      }
+    }
+  ]
+}

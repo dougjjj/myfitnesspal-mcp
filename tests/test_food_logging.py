@@ -26,6 +26,17 @@ def _food_adds(client):
     return [call for call in client.session.calls if call[0] == "POST"]
 
 
+def _diary_writes(client):
+    writes = []
+    for method, url, payload in client.session.calls:
+        if method != "POST":
+            continue
+        path = url.split("?", 1)[0].rstrip("/")
+        if path.endswith("/food/add") or path.endswith("/api/services/diary"):
+            writes.append((method, url, payload))
+    return writes
+
+
 def test_draft_lists_options_with_every_serving(banana_details, store):
     draft = food_logging.draft_food(banana_details, store, "banana", TODAY)
     assert draft["draft_id"]
@@ -150,7 +161,9 @@ def test_bare_exact_match_skips_details_calls(banana_details, store, monkeypatch
     )
     assert result["source"] == "exact_match"
     assert result["serving"] == "1 medium"
-    searches = [url for _, url, _ in banana_details.session.calls if "search" in url]
+    searches = [
+        url for _, url, _ in banana_details.session.calls if "food/search" in url
+    ]
     assert len(searches) == 1
 
 
@@ -172,7 +185,7 @@ def test_bare_ambiguous_query_returns_draft_and_logs_nothing(banana_details, sto
     assert result["logged"] is None
     assert result["needs_choice"] is True
     assert result["draft_id"]
-    assert _food_adds(banana_details) == []
+    assert _diary_writes(banana_details) == []
 
 
 def test_pinned_food_missing_from_search_still_offered_first(client, store):
@@ -220,7 +233,7 @@ def test_modify_ambiguous_replacement_deletes_nothing(banana_details, store):
     )
     assert result["needs_choice"] is True
     assert result["removed"] is None
-    assert _food_adds(banana_details) == []
+    assert _diary_writes(banana_details) == []
 
     confirmed = food_logging.modify_food(
         banana_details,

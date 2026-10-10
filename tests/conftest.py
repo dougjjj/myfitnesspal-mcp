@@ -104,6 +104,34 @@ def client(search_html, diary_html):
         "GET", "food/note", FakeResponse(json_data={"item": {"body": "hello world"}})
     )
     fake.session.route("POST", "food/note", FakeResponse(status_code=200))
+    fake.session.route(
+        "GET", "api/auth/csrf", FakeResponse(json_data={"csrfToken": "csrf-test"})
+    )
+    fake.session.route("GET", "users/foods/mine", FakeResponse(json_data=[]))
+    fake.session.route("GET", "users/meals/mine", FakeResponse(json_data=[]))
+    fake.session.route(
+        "GET",
+        "recipe_parser",
+        FakeResponse(text="<html><body><div id='main'><ul></ul></div></body></html>"),
+    )
+    fake.session.route(
+        "GET",
+        "food/add_to_diary",
+        FakeResponse(
+            text='<html><head><meta name="csrf-token" content="CSRF123"></head></html>'
+        ),
+    )
+    fake.session.route(
+        "POST", "food/load_recent", FakeResponse(json_data={"items": []})
+    )
+    fake.session.route(
+        "POST", "food/load_most_used", FakeResponse(json_data={"items": []})
+    )
+    fake.session.route(
+        "POST",
+        "api/services/diary",
+        FakeResponse(status_code=200, json_data={"items": []}),
+    )
     return fake
 
 

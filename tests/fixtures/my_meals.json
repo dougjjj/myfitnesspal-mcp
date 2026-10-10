@@ -1,0 +1,39 @@
+[
+  {
+    "meal_id": "meal-77",
+    "description": "Weekend Breakfast",
+    "foods": [
+      {
+        "quantity": 2,
+        "food": {
+          "id": "tea-1",
+          "version": "tea-v1",
+          "description": "English Breakfast Tea with Milk",
+          "brand_name": "",
+          "serving_sizes": [
+            {
+              "id": "w-tea",
+              "value": 1,
+              "unit": "serving",
+              "nutrition_multiplier": 1
+            }
+          ],
+          "nutritional_contents": {
+            "energy": {"value": 6},
+            "protein": 0.2,
+            "carbohydrates": 1,
+            "fat": 0.1
+          }
+        }
+      },
+      {
+        "description": "Overnight Oats",
+        "quantity": 1,
+        "calories": 340,
+        "protein": 12,
+        "carbs": 48,
+        "fat": 9
+      }
+    ]
+  }
+]

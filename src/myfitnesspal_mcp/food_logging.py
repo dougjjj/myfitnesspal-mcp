@@ -1,7 +1,7 @@
 from dataclasses import asdict
 from datetime import date
 
-from . import diary
+from . import diary, personal
 from .food_ranking import MacroTargets, normalize_query, rank_candidates
 
 
@@ -236,7 +236,7 @@ BARE_QUERY_LIMIT = 10
 
 def _unambiguous_food(
     client, store, query: str
-) -> tuple[dict | None, list[dict] | None]:
+) -> tuple[dict | None, list[dict] | None, list[dict]]:
     pin = store.pin(query)
     if pin:
         food = {
@@ -246,7 +246,13 @@ def _unambiguous_food(
             "serving": pin["serving"],
             "source": "pin",
         }
-        return food, None
+        return food, None, []
+    matches = personal.matching_items(client, query)
+    chosen, ambiguous = personal.choose(matches, query)
+    if ambiguous:
+        return None, None, matches
+    if chosen is not None:
+        return chosen, None, matches
     search_results, _ = diary.food_search(client, query)
     wanted_name = normalize_query(query)
     exact_by_food_id = {}
@@ -254,7 +260,7 @@ def _unambiguous_food(
         if normalize_query(result["name"]) == wanted_name:
             exact_by_food_id.setdefault(result["food_id"], result)
     if len(exact_by_food_id) != 1:
-        return None, search_results
+        return None, search_results, []
     match = next(iter(exact_by_food_id.values()))
     food = {
         "food_id": match["food_id"],
@@ -263,16 +269,29 @@ def _unambiguous_food(
         "serving": match["serving"],
         "source": "exact_match",
     }
-    return food, search_results
+    return food, search_results, []
+
+
+def _log_chosen(client, food, day, meal, quantity, page=None):
+    if food.get("source") in personal.LOGGABLE_SOURCES:
+        return personal.log_match(client, food, day, meal, quantity, page)
+    result = log_exact(client, food, day, meal, quantity, page)
+    return {**result, "source": food["source"]}
+
+
+def _needs_choice(draft_id, body, matches):
+    view = {"logged": None, "needs_choice": True, **_draft_view(draft_id, body)}
+    if matches:
+        view["personal_matches"] = matches
+    return view
 
 
 def log_by_query(
     client, store, query: str, day: date, meal: str, quantity: float
 ) -> dict:
-    food, search_results = _unambiguous_food(client, store, query)
+    food, search_results, matches = _unambiguous_food(client, store, query)
     if food:
-        result = log_exact(client, food, day, meal, quantity)
-        return {**result, "source": food["source"]}
+        return _log_chosen(client, food, day, meal, quantity)
     draft_id, body = _build_draft(
         client,
         store,
@@ -284,7 +303,7 @@ def log_by_query(
         BARE_QUERY_LIMIT,
         search_results,
     )
-    return {"logged": None, "needs_choice": True, **_draft_view(draft_id, body)}
+    return _needs_choice(draft_id, body, matches)
 
 
 def modify_food(
@@ -310,7 +329,7 @@ def modify_food(
         return {"removed": removed["removed"], **added}
     replacement_query = new_query or query
     chosen_quantity = 1.0 if quantity is None else quantity
-    food, search_results = _unambiguous_food(client, store, replacement_query)
+    food, search_results, matches = _unambiguous_food(client, store, replacement_query)
     if food is None:
         draft_id, body = _build_draft(
             client,
@@ -325,15 +344,13 @@ def modify_food(
         )
         return {
             "removed": None,
-            "logged": None,
-            "needs_choice": True,
             "next_step": (
                 "nothing was changed; call fitness_modify_food again with the "
                 "same query plus draft_id and option"
             ),
-            **_draft_view(draft_id, body),
+            **_needs_choice(draft_id, body, matches),
         }
     page = diary.diary_page(client, day)
     removed = diary.delete_food(client, day, query, meal, page=page)
-    added = log_exact(client, food, day, meal, chosen_quantity, page)
-    return {"removed": removed["removed"], **added, "source": food["source"]}
+    added = _log_chosen(client, food, day, meal, chosen_quantity, page)
+    return {"removed": removed["removed"], **added}
