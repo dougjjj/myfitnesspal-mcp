@@ -6,22 +6,26 @@ the NextAuth CSRF from GET /api/auth/csrf as X-CSRF-Token and do not send the
 API bearer token. Recipes are still the legacy HTML pages /recipe_parser and
 /recipe/view/{id}. Recent and frequent foods are the add-to-diary tabs
 POST /food/load_recent and POST /food/load_most_used, which use the Rails
-csrf from GET /food/add_to_diary.
+csrf from GET /food/add_to_diary. Those tab calls are given a short timeout;
+if one hangs, search still returns the other sources and a warning.
 
 /food/add rejects v2 food ids. A personal food that has a version is logged
-with POST /api/services/diary. A recipe that only has a legacy food_id and
-weight_id is one /food/add line, and quantity is the number of servings.
-A saved meal is not copy_meal (that copies a diary section): each component
-is logged, component quantity times the requested servings. Components that
-arrive without ids are resolved by exact My Foods name first. If any
-component cannot be resolved, nothing is written.
+with POST /api/services/diary. A recipe is logged the way the recipe-logger
+modal does: POST /recipe/log_recipe with the recipe object embedded by
+MFP.Recipes.loadRecipe on the view page, plus servings, meal index, and date.
+The view page has no food_entry ids. A saved meal is not copy_meal (that
+copies a diary section): each component is logged, component quantity times
+the requested servings. Components that arrive without ids are resolved by
+exact My Foods name first. If any component cannot be resolved, nothing is
+written.
 """
 
+import json
 from urllib import parse
 
 from lxml import html as lh
 
-from . import diary
+from . import diary, mfp_client
 from .food_ranking import normalize_query
 
 PERSONAL_SOURCES = ("my_food", "my_meal", "my_recipe", "recent", "frequent")
@@ -30,6 +34,17 @@ _MAX_PAGES = 5
 # The add-to-diary recent/frequent tabs are per meal slot. The four default
 # slots match breakfast, lunch, dinner, and snacks.
 _RECENT_MEAL_SLOTS = ("0", "1", "2", "3")
+# Authenticated calls to the recent/frequent tabs have been observed to accept
+# the connection and then send nothing until curl's 30s timeout. Eight seconds
+# is long enough for a live tab and short enough to give the rest of a search
+# back.
+_TAB_TIMEOUT = 8
+
+
+class _SourceUnavailable(Exception):
+    def __init__(self, endpoint):
+        self.endpoint = endpoint
+        super().__init__(endpoint)
 
 
 class PersonalLookupError(diary.DiaryLookupError):
@@ -236,13 +251,29 @@ def _bff_csrf(client) -> str:
     return token
 
 
+def _raise_unless_auth(exc, endpoint):
+    if mfp_client.is_auth_error(exc):
+        raise exc
+    raise _SourceUnavailable(endpoint) from exc
+
+
 def _rails_csrf(client) -> str:
     cached = getattr(client, "_rails_csrf", None)
     if cached:
         return cached
+    if getattr(client, "_rails_csrf_failed", False):
+        raise _SourceUnavailable("GET /food/add_to_diary")
     url = parse.urljoin(client.BASE_URL_SECURE, "food/add_to_diary")
-    resp = client.session.get(url, headers=diary.api_headers(client))
-    resp.raise_for_status()
+    try:
+        resp = client.session.get(
+            url, headers=diary.api_headers(client), timeout=_TAB_TIMEOUT
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        if mfp_client.is_auth_error(exc):
+            raise
+        client._rails_csrf_failed = True
+        raise _SourceUnavailable("GET /food/add_to_diary") from exc
     doc = lh.fromstring(resp.text)
     tokens = doc.xpath("//meta[@name='csrf-token']/@content")
     if not tokens:
@@ -421,6 +452,13 @@ def _parse_recipe_list(document):
         weight_raw = link.get("data-weight-ids") or item.get("data-weight-ids") or ""
         weight_ids = [part for part in weight_raw.split(",") if part]
         serving, calories = _recipe_calories(item)
+        if calories is None:
+            calories = _card_number(item, "per-serving") or _card_number(
+                item, None, data_bind="recipe-calories"
+            )
+        recipe_servings = _number(item.get("data-servings"))
+        if recipe_servings is None:
+            recipe_servings = _card_number(item, "recipe-servings")
         recipes.append(
             {
                 "source": "my_recipe",
@@ -443,10 +481,112 @@ def _parse_recipe_list(document):
                 "meal_id": None,
                 "recipe_id": recipe_id,
                 "quantity": None,
-                "recipe_servings": _number(item.get("data-servings")),
+                "recipe_servings": recipe_servings,
             }
         )
     return recipes
+
+
+def _card_number(item, class_name, data_bind=None):
+    if data_bind:
+        nodes = item.xpath(f".//*[@data-bind={data_bind!r}]")
+    else:
+        nodes = item.xpath(f".//*[contains(@class, {class_name!r})]")
+    if not nodes:
+        return None
+    return _first_number(nodes[0].text_content())
+
+
+def _embedded_recipes(html):
+    """Recipe objects already inlined by MFP.Recipes.loadRecipe. No extra HTTP."""
+    recipes = []
+    marker = "MFP.Recipes.loadRecipe("
+    start = 0
+    while True:
+        idx = html.find(marker, start)
+        if idx < 0:
+            return recipes
+        rest = html[idx + len(marker) :]
+        json_start = rest.find("{")
+        if json_start < 0:
+            return recipes
+        payload = _json_object(rest[json_start:])
+        if isinstance(payload, dict):
+            recipes.append(payload)
+            start = idx + len(marker) + json_start + 2
+        else:
+            start = idx + len(marker)
+
+
+def _json_object(text):
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, character in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[: index + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def _per_serving_nutrition(payload):
+    per = payload.get("nutritional_contents_per_serving")
+    per = per if isinstance(per, dict) else {}
+    contents = payload.get("nutritional_contents")
+    contents = contents if isinstance(contents, dict) else {}
+    servings = _number(payload.get("servings"))
+
+    def total(key):
+        value = _number(per.get(key))
+        if value is not None:
+            return value
+        whole = _number(contents.get(key))
+        if whole is None or not servings:
+            return None
+        return whole / servings
+
+    energy = per.get("energy")
+    calories = (
+        _number(energy.get("value")) if isinstance(energy, dict) else _number(energy)
+    )
+    if calories is None:
+        calories = total("energy")
+    carbs = total("carbohydrates")
+    if carbs is None:
+        carbs = total("carbs")
+    return calories, total("protein"), carbs, total("fat"), servings
+
+
+def _fill_nutrition(record, payload):
+    calories, protein, carbs, fat, servings = _per_serving_nutrition(payload)
+    if record.get("calories") is None:
+        record["calories"] = calories
+    if record.get("protein") is None:
+        record["protein"] = protein
+    if record.get("carbs") is None:
+        record["carbs"] = carbs
+    if record.get("fat") is None:
+        record["fat"] = fat
+    if record.get("recipe_servings") is None and servings is not None:
+        record["recipe_servings"] = servings
+    if not record.get("name") and payload.get("name"):
+        record["name"] = payload["name"]
 
 
 def _recipe_has_next(document, page):
@@ -469,6 +609,15 @@ def list_my_recipes(client, search="", limit=50):
         resp.raise_for_status()
         document = lh.fromstring(resp.text)
         batch = _parse_recipe_list(document)
+        embedded = {
+            str(payload.get("id")): payload
+            for payload in _embedded_recipes(resp.text)
+            if payload.get("id") is not None
+        }
+        for recipe in batch:
+            payload = embedded.get(str(recipe["recipe_id"]))
+            if payload:
+                _fill_nutrition(recipe, payload)
         fresh = 0
         for recipe in batch:
             if recipe["recipe_id"] in seen:
@@ -489,7 +638,7 @@ def parse_recipe_view(html):
     document = lh.fromstring(html)
     food_ids = document.xpath("//input[@name='food_entry[food_id]']/@value")
     weight_ids = document.xpath("//input[@name='food_entry[weight_id]']/@value")
-    return {
+    parsed = {
         "name": _xpath_text(document, '//*[@id="main"]/div[3]/div[2]/h1'),
         "recipe_servings": _first_number(
             _xpath_text(document, '//*[@id="recipe_servings"]')
@@ -507,15 +656,19 @@ def parse_recipe_view(html):
         "food_id": _json_id(food_ids[0]) if food_ids else None,
         "weight_id": _json_id(weight_ids[0]) if weight_ids else None,
     }
+    embedded = _embedded_recipes(html)
+    if embedded:
+        _fill_nutrition(parsed, embedded[0])
+    return parsed
 
 
-def _recipe_view(client, recipe_id):
+def _fetch_recipe_html(client, recipe_id):
     url = parse.urljoin(
         client.BASE_URL_SECURE, f"recipe/view/{parse.quote(str(recipe_id))}"
     )
     resp = client.session.get(url, headers=diary.api_headers(client))
     resp.raise_for_status()
-    return parse_recipe_view(resp.text)
+    return url, resp.text
 
 
 def _load_tab(client, endpoint, source, limit):
@@ -534,12 +687,20 @@ def _load_tab(client, endpoint, source, limit):
     for meal in _RECENT_MEAL_SLOTS:
         base_index = 0
         for page in range(1, _MAX_PAGES + 1):
-            resp = client.session.post(
-                url,
-                data={"meal": meal, "base_index": str(base_index), "page": str(page)},
-                headers=headers,
-            )
-            resp.raise_for_status()
+            try:
+                resp = client.session.post(
+                    url,
+                    data={
+                        "meal": meal,
+                        "base_index": str(base_index),
+                        "page": str(page),
+                    },
+                    headers=headers,
+                    timeout=_TAB_TIMEOUT,
+                )
+                resp.raise_for_status()
+            except Exception as exc:
+                _raise_unless_auth(exc, f"POST /{endpoint}")
             items = _as_list(resp.json())
             if not items:
                 break
@@ -562,12 +723,32 @@ def _load_tab(client, endpoint, source, limit):
     return collected
 
 
+def _tab_warning(label, endpoint):
+    return f"{label} foods didn't respond ({endpoint}); those results were left out."
+
+
+def read_recent_foods(client, limit=50):
+    try:
+        return _load_tab(client, "food/load_recent", "recent", limit), []
+    except _SourceUnavailable as exc:
+        return [], [_tab_warning("Recent", exc.endpoint)]
+
+
+def read_frequent_foods(client, limit=50):
+    try:
+        return _load_tab(client, "food/load_most_used", "frequent", limit), []
+    except _SourceUnavailable as exc:
+        return [], [_tab_warning("Frequent", exc.endpoint)]
+
+
 def list_recent_foods(client, limit=50):
-    return _load_tab(client, "food/load_recent", "recent", limit)
+    items, _warnings = read_recent_foods(client, limit)
+    return items
 
 
 def list_frequent_foods(client, limit=50):
-    return _load_tab(client, "food/load_most_used", "frequent", limit)
+    items, _warnings = read_frequent_foods(client, limit)
+    return items
 
 
 def _public_result(result):
@@ -594,19 +775,23 @@ def _public_result(result):
 def matching_items(client, query):
     """Personal foods, meals, recipes, recents, and frequents that fit `query`.
 
-    Recents and frequents that repeat a food id already returned by an earlier
-    source are dropped. The public database is not queried.
+    Returns (matches, warnings). Recents and frequents that repeat a food id
+    already returned by an earlier source are dropped. A recent or frequent
+    tab that times out is omitted and named in warnings. The public database
+    is not queried.
     """
     groups = (
-        list_my_foods(client, limit=None),
-        list_my_meals(client, limit=None),
-        list_my_recipes(client, limit=None),
-        list_recent_foods(client, limit=None),
-        list_frequent_foods(client, limit=None),
+        (list_my_foods(client, limit=None), []),
+        (list_my_meals(client, limit=None), []),
+        (list_my_recipes(client, limit=None), []),
+        read_recent_foods(client, limit=None),
+        read_frequent_foods(client, limit=None),
     )
     ordered = []
+    warnings = []
     seen = set()
-    for items in groups:
+    for items, notes in groups:
+        warnings.extend(notes)
         for item in items:
             if not _name_hit(item["name"], query):
                 continue
@@ -617,7 +802,7 @@ def matching_items(client, query):
             if key is not None and item["source"] in ("my_food", "recent", "frequent"):
                 seen.add(key)
             ordered.append(item)
-    return ordered
+    return ordered, warnings
 
 
 def choose(matches, query):
@@ -651,7 +836,9 @@ def choose(matches, query):
 
 
 def find_food(client, query, limit=5, with_macros=True):
-    personal = matching_items(client, query)
+    """Returns (results, warnings). Warnings name a recent or frequent tab
+    that did not respond; the other sources are still included."""
+    personal, warnings = matching_items(client, query)
     seen = {
         str(item["food_id"]) for item in personal if item.get("food_id") is not None
     }
@@ -661,7 +848,7 @@ def find_food(client, query, limit=5, with_macros=True):
         if food_id is not None and str(food_id) in seen:
             continue
         public.append(_public_result(result))
-    return (personal + public)[:limit]
+    return (personal + public)[:limit], warnings
 
 
 def _meal_page(client, day, meal, page):
@@ -751,27 +938,130 @@ def log_my_food(client, food_id, day, meal, quantity, page=None):
     return log_library_food(client, item, day, meal, quantity, page)
 
 
-def _with_recipe_ids(client, item):
-    if item.get("version") or (item.get("food_id") and item.get("weight_id")):
-        return item
-    details = _recipe_view(client, item["recipe_id"])
-    merged = dict(item)
-    for key in ("food_id", "weight_id", "calories", "protein", "carbs", "fat"):
-        if merged.get(key) is None and details.get(key) is not None:
-            merged[key] = details[key]
-    if not merged.get("name") and details.get("name"):
-        merged["name"] = details["name"]
-    return merged
+def _js_scalar(value):
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _form_pairs(prefix, value, out):
+    """Flatten a payload the way jQuery.param does for the recipe logger."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            name = f"{prefix}[{key}]" if prefix else str(key)
+            _form_pairs(name, item, out)
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            if isinstance(item, (dict, list, tuple)):
+                _form_pairs(f"{prefix}[{index}]", item, out)
+            else:
+                _form_pairs(f"{prefix}[]", item, out)
+        return
+    out.append((prefix, _js_scalar(value)))
+
+
+def _csrf_from_html(html):
+    tokens = lh.fromstring(html).xpath("//meta[@name='csrf-token']/@content")
+    if not tokens:
+        raise RuntimeError("couldn't read the MyFitnessPal csrf token")
+    return tokens[0]
+
+
+def _post_recipe_log(client, recipe_url, html, payload, day, meal_position, quantity):
+    # The logger submits the loadRecipe object. recipe_servings is the edit-form
+    # yield; on the view page that node is a label, so jQuery sends "".
+    csrf = _csrf_from_html(html)
+    pairs = []
+    _form_pairs(
+        "",
+        {
+            "url": "",
+            "recipe": payload,
+            "servings": quantity,
+            "recipe_servings": "",
+            "meal": str(meal_position),
+            "edited": "",
+            "date": day.isoformat(),
+            "type": "log",
+            "publish": 0,
+            "share_text": "",
+            "authenticity_token": csrf,
+        },
+        pairs,
+    )
+    resp = client.session.post(
+        parse.urljoin(client.BASE_URL_SECURE, "recipe/log_recipe"),
+        data=pairs,
+        headers={
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-CSRF-Token": csrf,
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": "https://www.myfitnesspal.com",
+            "Referer": recipe_url,
+        },
+    )
+    if resp.status_code not in (200, 201, 204):
+        raise RuntimeError(
+            f"MyFitnessPal /recipe/log_recipe returned HTTP {resp.status_code}"
+        )
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict) and body.get("status") == "error":
+        raise PersonalLookupError("MyFitnessPal could not log that recipe")
+
+
+def _recipe_result(item, day, meal, quantity, recipe_id):
+    result = _log_result(item, day, meal, quantity, "my_recipe")
+    result["recipe_id"] = str(recipe_id)
+    result["calories"] = item.get("calories")
+    result["protein"] = item.get("protein")
+    result["carbs"] = item.get("carbs")
+    result["fat"] = item.get("fat")
+    result["recipe_servings"] = item.get("recipe_servings")
+    return result
 
 
 def log_recipe(client, recipe_id, day, meal, quantity, page=None):
     item = _require(
         list_my_recipes(client, limit=None), "recipe_id", recipe_id, "My Recipe"
     )
-    item = _with_recipe_ids(client, item)
-    if not item.get("version") and not (item.get("food_id") and item.get("weight_id")):
-        raise PersonalLookupError(f"recipe {recipe_id!r} has no food id to log")
-    return log_library_food(client, item, day, meal, quantity, page)
+    recipe_url, html = _fetch_recipe_html(client, recipe_id)
+    details = parse_recipe_view(html)
+    merged = dict(item)
+    for key in ("name", "calories", "protein", "carbs", "fat", "recipe_servings"):
+        if details.get(key) is not None:
+            merged[key] = details[key]
+    payloads = _embedded_recipes(html)
+    payload = next(
+        (
+            candidate
+            for candidate in payloads
+            if str(candidate.get("id")) == str(recipe_id)
+        ),
+        None,
+    )
+    if payload is None and len(payloads) == 1:
+        payload = payloads[0]
+    position, page = _meal_page(client, day, meal, page)
+    if payload is not None:
+        _post_recipe_log(client, recipe_url, html, payload, day, position, quantity)
+        return _recipe_result(merged, day, meal, quantity, recipe_id)
+    food_id = merged.get("food_id") or details.get("food_id")
+    weight_id = merged.get("weight_id") or details.get("weight_id")
+    if food_id and weight_id:
+        diary.push_food(client, day, meal, food_id, weight_id, quantity, page)
+        merged["food_id"] = food_id
+        merged["weight_id"] = weight_id
+        return _recipe_result(merged, day, meal, quantity, recipe_id)
+    raise PersonalLookupError(f"recipe {recipe_id!r} has no recipe payload to log")
 
 
 def _can_log(item):

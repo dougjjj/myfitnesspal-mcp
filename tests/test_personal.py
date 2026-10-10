@@ -30,6 +30,16 @@ def library(client, make_response):
         make_response(text=(FIXTURES / "recipes.html").read_text()),
     )
     client.session.route(
+        "GET",
+        "recipe/view/",
+        make_response(text=(FIXTURES / "recipe_view.html").read_text()),
+    )
+    client.session.route(
+        "POST",
+        "recipe/log_recipe",
+        make_response(json_data={"status": "ok"}),
+    )
+    client.session.route(
         "POST", "food/load_recent", make_response(json_data=_load("recent_foods.json"))
     )
     client.session.route(
@@ -104,27 +114,28 @@ def test_recipe_list_includes_macros_and_log_ids(library):
     assert len(pages) == 1
 
 
-def test_recipe_view_exposes_log_ids():
+def test_recipe_view_reads_logger_nutrition_without_food_ids():
     parsed = personal.parse_recipe_view((FIXTURES / "recipe_view.html").read_text())
     assert parsed["name"] == "Homemade Pancakes"
-    assert parsed["calories"] == 320
-    assert parsed["recipe_servings"] == 8
+    assert parsed["calories"] == 240
+    assert parsed["recipe_servings"] == 4
     assert parsed["protein"] == 8
-    assert parsed["carbs"] == 40
-    assert parsed["fat"] == 12
-    assert parsed["food_id"] == "9001"
-    assert parsed["weight_id"] == "77"
+    assert parsed["carbs"] == 30
+    assert parsed["fat"] == 6
+    assert parsed["food_id"] is None
+    assert parsed["weight_id"] is None
 
 
 def test_find_ranks_personal_sources_before_public(library):
-    tea = personal.find_food(library, "tea")
+    tea, warnings = personal.find_food(library, "tea")
+    assert warnings == []
     assert tea[0]["source"] == "my_food"
     assert tea[0]["food_id"] == "tea-1"
     assert [item["food_id"] for item in tea if item.get("food_id") == "tea-1"] == [
         "tea-1"
     ]
 
-    pancakes = personal.find_food(library, "pancake")
+    pancakes, _warnings = personal.find_food(library, "pancake")
     assert [(item["source"], item["name"]) for item in pancakes[:3]] == [
         ("my_recipe", "Homemade Pancakes"),
         ("recent", "Pancake syrup"),
@@ -135,7 +146,7 @@ def test_find_ranks_personal_sources_before_public(library):
         for item in pancakes
     )
 
-    banana = personal.find_food(library, "banana")
+    banana, _warnings = personal.find_food(library, "banana")
     assert banana[0]["source"] == "public"
     assert banana[0]["name"] == "Banana"
     assert banana[0]["food_id"] == "111"
@@ -160,38 +171,68 @@ def test_log_my_food_uses_diary_api(library):
     assert _food_add_posts(library) == []
 
 
-def test_log_recipe_posts_legacy_ids_and_servings(library):
+def _form(data):
+    return dict(data)
+
+
+def test_log_recipe_posts_the_logger_payload(library):
     result = personal.log_recipe(library, "pancakes-1", TODAY, "breakfast", 2)
     assert result["source"] == "my_recipe"
     assert result["logged"] == "Homemade Pancakes"
     assert result["quantity"] == 2
-    adds = _food_add_posts(library)
-    assert len(adds) == 1
-    assert adds[0][2]["data"]["food_entry[food_id]"] == "9001"
-    assert adds[0][2]["data"]["food_entry[weight_id]"] == "77"
-    assert adds[0][2]["data"]["food_entry[quantity]"] == "2"
+    assert result["calories"] == 240
+    assert result["recipe_servings"] == 4
+    assert result["protein"] == 8
+    posts = [
+        call
+        for call in library.session.calls
+        if call[0] == "POST"
+        and call[1].split("?", 1)[0].rstrip("/").endswith("/recipe/log_recipe")
+    ]
+    assert len(posts) == 1
+    form = _form(posts[0][2]["data"])
+    assert form["type"] == "log"
+    assert form["servings"] == "2"
+    assert form["meal"] == "0"
+    assert form["date"] == "2026-07-08"
+    assert form["recipe_servings"] == ""
+    assert form["authenticity_token"] == "csrf-recipe"
+    assert form["recipe[id]"] == "pancakes-1"
+    assert form["recipe[name]"] == "Homemade Pancakes"
+    assert form["recipe[servings]"] == "4"
+    assert form["recipe[nutritional_contents_per_serving][energy][value]"] == "240"
+    assert form["recipe[ingredients][0][food_id]"] == "flour-1"
+    assert posts[0][2]["headers"]["X-CSRF-Token"] == "csrf-recipe"
+    assert "Authorization" not in posts[0][2]["headers"]
+    assert _food_add_posts(library) == []
     assert _diary_posts(library) == []
-    assert not any("recipe/view/" in url for _, url, _ in library.session.calls)
 
 
-def test_recipe_without_list_ids_uses_the_view_page(library, make_response):
+def test_recipe_without_list_ids_uses_the_logger(library, make_response):
     html = """
     <html><body><div id="main"><ul>
     <li><div></div><div><h2><span>
     <a href="/recipe/view/pancakes-1" title="Homemade Pancakes">Homemade Pancakes</a>
-    </span></h2></div></li>
+    </span></h2>
+    <div class="calories"><span class="per-serving">240</span> calories</div>
+    <label class="recipe-servings">4</label>
+    </div></li>
     </ul></div></body></html>
     """
     library.session.route("GET", "recipe_parser", make_response(text=html))
-    library.session.route(
-        "GET",
-        "recipe/view/",
-        make_response(text=(FIXTURES / "recipe_view.html").read_text()),
-    )
+    listed = personal.list_my_recipes(library)
+    assert listed[0]["food_id"] is None
+    assert listed[0]["calories"] == 240
+    assert listed[0]["recipe_servings"] == 4
     result = personal.log_recipe(library, "pancakes-1", TODAY, "lunch", 1)
-    assert result["food_id"] == "9001"
-    assert result["weight_id"] == "77"
+    assert result["recipe_id"] == "pancakes-1"
+    assert result["calories"] == 240
+    assert result["meal"] == "lunch"
     assert any("recipe/view/pancakes-1" in url for _, url, _ in library.session.calls)
+    assert any(
+        url.endswith("/recipe/log_recipe") for _, url, _ in library.session.calls
+    )
+    assert _food_add_posts(library) == []
 
 
 def test_saved_meal_logs_every_component(library):
@@ -264,8 +305,14 @@ def test_query_close_match_logs_recipe(library, store):
         library, store, "pancakes", TODAY, "breakfast", 2
     )
     assert result["source"] == "my_recipe"
-    assert result["food_id"] == "9001"
-    assert _food_add_posts(library)[0][2]["data"]["food_entry[quantity]"] == "2"
+    assert result["recipe_id"] == "pancakes-1"
+    assert result["calories"] == 240
+    logged = [
+        call
+        for call in library.session.calls
+        if call[0] == "POST" and "recipe/log_recipe" in call[1]
+    ]
+    assert _form(logged[0][2]["data"])["servings"] == "2"
     assert not any("food/search" in url for _, url, _ in library.session.calls)
 
 
@@ -357,3 +404,133 @@ def test_server_search_reports_source(connected):
     assert [(item["source"], item["name"]) for item in found["results"][:3]] == [
         (item["source"], item["name"]) for item in same["results"][:3]
     ]
+    assert "warnings" not in found
+
+
+class _Hang:
+    status_code = 200
+    text = ""
+
+    def raise_for_status(self):
+        raise TimeoutError("timed out")
+
+    def json(self):
+        raise TimeoutError("timed out")
+
+
+def test_recent_timeout_keeps_other_sources(library):
+    library.session.route("POST", "food/load_recent", _Hang())
+    results, warnings = personal.find_food(library, "pancake")
+    assert [item["source"] for item in results[:2]] == ["my_recipe", "frequent"]
+    assert results[0]["name"] == "Homemade Pancakes"
+    assert results[1]["name"] == "Pancake mix"
+    assert warnings == [
+        "Recent foods didn't respond (POST /food/load_recent); "
+        "those results were left out."
+    ]
+    recent = [
+        call
+        for call in library.session.calls
+        if call[0] == "POST" and "food/load_recent" in call[1]
+    ]
+    frequent = [
+        call
+        for call in library.session.calls
+        if call[0] == "POST" and "food/load_most_used" in call[1]
+    ]
+    csrf = [
+        call
+        for call in library.session.calls
+        if call[0] == "GET" and "food/add_to_diary" in call[1]
+    ]
+    assert recent[0][2]["timeout"] == personal._TAB_TIMEOUT
+    assert frequent[0][2]["timeout"] == personal._TAB_TIMEOUT
+    assert csrf[0][2]["timeout"] == personal._TAB_TIMEOUT
+
+
+def test_hung_diary_page_is_not_fetched_again_for_frequent(library):
+    library.session.route("GET", "food/add_to_diary", _Hang())
+    recent, recent_warnings = personal.read_recent_foods(library)
+    frequent, frequent_warnings = personal.read_frequent_foods(library)
+    assert recent == []
+    assert frequent == []
+    assert recent_warnings[0].startswith("Recent foods didn't respond")
+    assert "GET /food/add_to_diary" in recent_warnings[0]
+    assert "GET /food/add_to_diary" in frequent_warnings[0]
+    gets = [
+        call
+        for call in library.session.calls
+        if call[0] == "GET" and "food/add_to_diary" in call[1]
+    ]
+    assert len(gets) == 1
+    assert not any(
+        call[0] == "POST" and "food/load_" in call[1] for call in library.session.calls
+    )
+
+
+def test_recent_auth_failure_still_raises(library, make_response):
+    library.session.route(
+        "POST", "food/load_recent", make_response(status_code=401, text="HTTP 401")
+    )
+    with pytest.raises(RuntimeError, match="401") as caught:
+        personal.read_recent_foods(library)
+    assert mfp_client.is_auth_error(caught.value) is True
+    assert getattr(library, "_rails_csrf_failed", False) is False
+
+
+def test_recipe_list_uses_embedded_nutrition_without_opening_the_view(
+    library, make_response
+):
+    html = """
+    <html><body><div id="main"><ul>
+    <li data-protein="8"><div></div><div><h2><span>
+    <a href="/recipe/view/pancakes-1" title="Homemade Pancakes">Homemade Pancakes</a>
+    </span></h2></div></li>
+    </ul></div>
+    <script>
+    MFP.Recipes.loadRecipe("pancakes-1", {"id":"pancakes-1","name":"Homemade Pancakes","servings":4,"nutritional_contents_per_serving":{"energy":{"value":240,"unit":"calories"},"protein":99,"carbohydrates":30,"fat":6}});
+    </script>
+    </body></html>
+    """
+    library.session.route("GET", "recipe_parser", make_response(text=html))
+    listed = personal.list_my_recipes(library)
+    assert listed[0]["calories"] == 240
+    assert listed[0]["protein"] == 8
+    assert listed[0]["carbs"] == 30
+    assert listed[0]["fat"] == 6
+    assert listed[0]["recipe_servings"] == 4
+    assert not any(
+        "recipe/view/" in url for _method, url, _payload in library.session.calls
+    )
+
+
+def test_recipe_logger_error_is_not_an_auth_error(library, make_response):
+    library.session.route(
+        "POST",
+        "recipe/log_recipe",
+        make_response(json_data={"status": "error"}),
+    )
+    with pytest.raises(personal.PersonalLookupError, match="could not log") as caught:
+        personal.log_recipe(library, "pancakes-1", TODAY, "breakfast", 1)
+    assert mfp_client.is_auth_error(caught.value) is False
+    assert _food_add_posts(library) == []
+
+
+def test_query_log_includes_a_warning_when_recent_times_out(library, store):
+    library.session.route("POST", "food/load_recent", _Hang())
+    result = food_logging.log_by_query(
+        library, store, "pancakes", TODAY, "breakfast", 2
+    )
+    assert result["source"] == "my_recipe"
+    assert result["recipe_id"] == "pancakes-1"
+    assert "POST /food/load_recent" in result["warnings"][0]
+
+
+def test_server_returns_warnings_instead_of_failing(connected):
+    connected.session.route("POST", "food/load_recent", _Hang())
+    found = asyncio.run(server.fitness_find_food(query="pancake"))
+    assert found["results"][0]["source"] == "my_recipe"
+    assert "POST /food/load_recent" in found["warnings"][0]
+    listed = asyncio.run(server.fitness_list_recent_foods())
+    assert listed["items"] == []
+    assert "POST /food/load_recent" in listed["warnings"][0]

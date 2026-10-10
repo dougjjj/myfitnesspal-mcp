@@ -236,7 +236,7 @@ BARE_QUERY_LIMIT = 10
 
 def _unambiguous_food(
     client, store, query: str
-) -> tuple[dict | None, list[dict] | None, list[dict]]:
+) -> tuple[dict | None, list[dict] | None, list[dict], list[str]]:
     pin = store.pin(query)
     if pin:
         food = {
@@ -246,13 +246,13 @@ def _unambiguous_food(
             "serving": pin["serving"],
             "source": "pin",
         }
-        return food, None, []
-    matches = personal.matching_items(client, query)
+        return food, None, [], []
+    matches, warnings = personal.matching_items(client, query)
     chosen, ambiguous = personal.choose(matches, query)
     if ambiguous:
-        return None, None, matches
+        return None, None, matches, warnings
     if chosen is not None:
-        return chosen, None, matches
+        return chosen, None, matches, warnings
     search_results, _ = diary.food_search(client, query)
     wanted_name = normalize_query(query)
     exact_by_food_id = {}
@@ -260,7 +260,7 @@ def _unambiguous_food(
         if normalize_query(result["name"]) == wanted_name:
             exact_by_food_id.setdefault(result["food_id"], result)
     if len(exact_by_food_id) != 1:
-        return None, search_results, []
+        return None, search_results, [], warnings
     match = next(iter(exact_by_food_id.values()))
     food = {
         "food_id": match["food_id"],
@@ -269,7 +269,13 @@ def _unambiguous_food(
         "serving": match["serving"],
         "source": "exact_match",
     }
-    return food, search_results, []
+    return food, search_results, [], warnings
+
+
+def _with_warnings(result, warnings):
+    if warnings:
+        return {**result, "warnings": warnings}
+    return result
 
 
 def _log_chosen(client, food, day, meal, quantity, page=None):
@@ -289,9 +295,9 @@ def _needs_choice(draft_id, body, matches):
 def log_by_query(
     client, store, query: str, day: date, meal: str, quantity: float
 ) -> dict:
-    food, search_results, matches = _unambiguous_food(client, store, query)
+    food, search_results, matches, warnings = _unambiguous_food(client, store, query)
     if food:
-        return _log_chosen(client, food, day, meal, quantity)
+        return _with_warnings(_log_chosen(client, food, day, meal, quantity), warnings)
     draft_id, body = _build_draft(
         client,
         store,
@@ -303,7 +309,7 @@ def log_by_query(
         BARE_QUERY_LIMIT,
         search_results,
     )
-    return _needs_choice(draft_id, body, matches)
+    return _with_warnings(_needs_choice(draft_id, body, matches), warnings)
 
 
 def modify_food(
@@ -329,7 +335,9 @@ def modify_food(
         return {"removed": removed["removed"], **added}
     replacement_query = new_query or query
     chosen_quantity = 1.0 if quantity is None else quantity
-    food, search_results, matches = _unambiguous_food(client, store, replacement_query)
+    food, search_results, matches, warnings = _unambiguous_food(
+        client, store, replacement_query
+    )
     if food is None:
         draft_id, body = _build_draft(
             client,
@@ -342,15 +350,18 @@ def modify_food(
             BARE_QUERY_LIMIT,
             search_results,
         )
-        return {
-            "removed": None,
-            "next_step": (
-                "nothing was changed; call fitness_modify_food again with the "
-                "same query plus draft_id and option"
-            ),
-            **_needs_choice(draft_id, body, matches),
-        }
+        return _with_warnings(
+            {
+                "removed": None,
+                "next_step": (
+                    "nothing was changed; call fitness_modify_food again with the "
+                    "same query plus draft_id and option"
+                ),
+                **_needs_choice(draft_id, body, matches),
+            },
+            warnings,
+        )
     page = diary.diary_page(client, day)
     removed = diary.delete_food(client, day, query, meal, page=page)
     added = _log_chosen(client, food, day, meal, chosen_quantity, page)
-    return {"removed": removed["removed"], **added}
+    return _with_warnings({"removed": removed["removed"], **added}, warnings)

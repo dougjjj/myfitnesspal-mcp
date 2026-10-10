@@ -1,4 +1,6 @@
-<html><body>
+<html><head>
+<meta name="csrf-token" content="csrf-recipe">
+</head><body>
 <div id="main">
   <div></div>
   <div></div>
@@ -7,14 +9,23 @@
     <div>
       <h1>Homemade Pancakes</h1>
       <div></div>
-      <div><div>320</div></div>
+      <div><div>240</div></div>
     </div>
   </div>
 </div>
-<div id="recipe_servings">8</div>
+<label id="recipe_servings" class="recipe-servings">4</label>
 <div id="protein"><td><span>g</span><span>8</span></td></div>
-<div id="carbs"><td><span>g</span><span>40</span></td></div>
-<div id="total_fat"><td><span>g</span><span>12</span></td></div>
-<input type="hidden" name="food_entry[food_id]" value="9001">
-<input type="hidden" name="food_entry[weight_id]" value="77">
+<div id="carbs"><td><span>g</span><span>30</span></td></div>
+<div id="total_fat"><td><span>g</span><span>6</span></td></div>
+<div id="recipe-logger-modal">
+  <form action="/recipe/view/pancakes-1" method="post">
+    <input type="hidden" id="recipe-log-date">
+    <div id="meal"></div>
+    <div id="servings"></div>
+    <a name="log-recipe" data-recipe="pancakes-1" href="#">Log It</a>
+  </form>
+</div>
+<script>
+MFP.Recipes.loadRecipe("pancakes-1", {"id":"pancakes-1","name":"Homemade Pancakes","servings":4,"public":false,"nutritional_contents":{"energy":{"value":960,"unit":"calories"},"protein":32,"carbohydrates":120,"fat":24},"nutritional_contents_per_serving":{"energy":{"value":240,"unit":"calories"},"protein":8,"carbohydrates":30,"fat":6},"ingredients":[{"food_id":"flour-1","quantity":1,"original":"1 cup flour"}]});
+</script>
 </body></html>

@@ -265,10 +265,11 @@ async def fitness_get_day(date: str | None = None, ctx: Context = None) -> dict:
 
 async def _find_food(query, limit, with_macros, ctx):
     def op(store, client):
-        return {
-            "query": query,
-            "results": personal.find_food(client, query, limit, with_macros),
-        }
+        results, warnings = personal.find_food(client, query, limit, with_macros)
+        payload = {"query": query, "results": results}
+        if warnings:
+            payload["warnings"] = warnings
+        return payload
 
     return await with_session(ctx, op)
 
@@ -283,7 +284,9 @@ async def fitness_search_food(
     fat, serving, and source: my_food, my_meal, my_recipe, recent, frequent,
     or public. Ids for logging are included: food_id + version (My Food or
     recent), recipe_id, or meal_id. A recent result's quantity is how many
-    servings were last logged. fitness_find_food returns the same results.
+    servings were last logged. If the recent or frequent tab does not
+    respond, it is omitted and named in warnings; the other sources are
+    still returned. fitness_find_food returns the same results.
     """
     return await _find_food(query, limit, with_macros, ctx)
 
@@ -296,6 +299,7 @@ async def fitness_find_food(
 
     The user's My Foods, saved meals, recipes, recent foods, and frequent
     foods rank ahead of the public database. Every result has a source field.
+    A recent or frequent tab that does not respond is named in warnings.
     """
     return await _find_food(query, limit, with_macros, ctx)
 
@@ -340,10 +344,10 @@ async def fitness_list_my_recipes(
 ) -> dict:
     """List the user's recipes.
 
-    Each recipe has recipe_id, name, calories, macros, serving, and the
-    food_id + weight_id used to log it. Log with
+    Each recipe has recipe_id and name. Calories, macros, and recipe_servings
+    are included when that list page already shows them. Log with
     fitness_log_food(recipe_id=..., quantity=<servings>). quantity is how
-    many servings to add, as one diary line.
+    many servings to add, as one diary line, via the recipe logger.
     """
 
     def op(store, client):
@@ -357,11 +361,16 @@ async def fitness_list_recent_foods(limit: int = 50, ctx: Context = None) -> dic
     """Foods from the diary add-food Recent tabs.
 
     quantity is the last logged serving count. food_id, version, and
-    weight_id are enough to log the food.
+    weight_id are enough to log the food. If the tab does not respond,
+    items is empty and warnings names the endpoint.
     """
 
     def op(store, client):
-        return {"items": personal.list_recent_foods(client, limit)}
+        items, warnings = personal.read_recent_foods(client, limit)
+        payload = {"items": items}
+        if warnings:
+            payload["warnings"] = warnings
+        return payload
 
     return await with_session(ctx, op)
 
@@ -371,11 +380,16 @@ async def fitness_list_frequent_foods(limit: int = 50, ctx: Context = None) -> d
     """Foods from the diary add-food Frequent tabs.
 
     Each item has name, calories, macros, serving, food_id, version, and
-    weight_id.
+    weight_id. If the tab does not respond, items is empty and warnings
+    names the endpoint.
     """
 
     def op(store, client):
-        return {"items": personal.list_frequent_foods(client, limit)}
+        items, warnings = personal.read_frequent_foods(client, limit)
+        payload = {"items": items}
+        if warnings:
+            payload["warnings"] = warnings
+        return payload
 
     return await with_session(ctx, op)
 
@@ -455,7 +469,8 @@ async def fitness_log_food(
     the same query later reuses this food and serving.
 
     my_food_id logs that My Food (first serving size). recipe_id logs the
-    recipe as one diary line; quantity is the number of servings.
+    recipe as one diary line through the recipe logger; quantity is the
+    number of servings.
     saved_meal_id logs every food in the saved meal. Each component's own
     quantity is multiplied by quantity. meal is the diary section
     (breakfast, lunch, dinner, snacks, or a custom meal name), not the
@@ -466,7 +481,8 @@ async def fitness_log_food(
     whole meal; a recipe match logs that many servings). Several personal
     matches log nothing and return a draft plus personal_matches. If nothing
     personal matches, a single exact public name is logged; otherwise nothing
-    is logged and a draft is returned (needs_choice=true).
+    is logged and a draft is returned (needs_choice=true). A recent or
+    frequent tab that does not respond is skipped and named in warnings.
 
     food_id + weight_id (a public search hit) logs that item. `query` is its
     display name.
