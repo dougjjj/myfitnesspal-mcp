@@ -202,8 +202,11 @@ def parse_range(
 
 async def run_with_refresh(ctx: Context, op: Callable[[], Any]) -> Any:
     """Runs a blocking MFP operation; on an auth-shaped failure, notifies the
-    client, refreshes the session (headless browser profile when available,
-    otherwise re-reads MFP_COOKIE / cookies.json), and retries once."""
+    client, refreshes the session, and retries once.
+
+    A cookies.json rewritten by `mfp-mcp keepalive` is re-read from its mtime
+    before the headless profile runs, including on the next tool call.
+    """
     try:
         return await asyncio.to_thread(op)
     except Exception as exc:

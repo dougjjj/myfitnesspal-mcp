@@ -102,10 +102,46 @@ MFP_COOKIE="$COOKIE" mfp-mcp auth
 unset MFP_COOKIE
 ```
 
-Sessions last around 30 days. When one expires, either re-run `auth` or
-opt in to auto-refresh. `mfp-mcp auth --check` reports whether the saved
-session still works and whether auto-refresh is set up, without prompting or
-changing anything.
+`mfp-mcp auth --check` reports whether the saved session works and whether
+auto-refresh is set up, without prompting or changing anything.
+
+### Session lifetime
+
+The logged-in website polls `GET /api/auth/session` every 120 seconds
+(`SESSION_REFETCH_INTERVAL=120`, and again when the tab becomes visible).
+That poll is what rolls `__Secure-next-auth.session-token`. The NextAuth
+JWT helper shipped in the page defaults `maxAge` to 30 days. The public
+assets do not publish the server's `session.maxAge` or `updateAge`.
+
+This server exchanges that cookie once, when it builds a client, at
+`GET /user/auth_token?refresh=true`. The response carries `access_token`,
+`refresh_token`, `expires_in`, and `user_id`. On a real account the saved
+cookie stops being accepted about 1–2 hours after it is captured. The
+exchange then returns the logged-out HTML page, which shows up as
+"Could not access MyFitnessPal using the cookies provided by your browser".
+Opening the saved browser profile after that does not log in again: the
+profile holds the same cookie.
+
+`__Host-next-auth.csrf-token` and `__Secure-next-auth.callback-url` are
+sign-in bookkeeping. The session poll and the token exchange authenticate
+with `__Secure-next-auth.session-token`. The website deletes the legacy
+`known_user` cookie on logout; the exchange does not read it.
+
+Keep the cookie alive by scheduling keepalive with the same install that
+has the `[autorefresh]` extra (the one that seeded
+`~/.local/share/myfitnesspal-mcp/browser-profile`). Leave `MFP_COOKIE`
+unset so the running server reads the file. The server re-reads
+`cookies.json` when its modification time changes, so this process can
+stay up across refreshes:
+
+```bash
+mfp-mcp keepalive --loop --interval 20m
+```
+
+A one-shot `mfp-mcp keepalive` does the same refresh and exits. It exits
+non-zero when the session is already dead. Twenty minutes stays inside
+the observed 1–2 hour window. A homepage visit does not roll the cookie:
+the website waits 120 seconds before its next poll.
 
 Paste only `__Secure-next-auth.session-token`. Do not put `MFP_COOKIE` in an
 MCP client JSON file. The server is read-only until you set
@@ -126,10 +162,14 @@ MFP_ALLOW_WRITES=1 MFP_WRITE_TOOLS=food mfp-mcp
 
 The `autorefresh` extra can seed a persistent headless browser profile, but
 it does nothing until `MFP_AUTOREFRESH=1`. When that is set and MyFitnessPal
-rejects the session mid-call, the server tells your client it is retrying,
-boots the profile headlessly, lets MyFitnessPal rotate the session token,
-saves the fresh cookie, and retries the call. The profile is another copy of
-the session cookie on disk.
+rejects the session mid-call, the server tells your client it is retrying.
+If `cookies.json` has been rewritten since the process loaded it, the server
+re-reads that file and does not launch the browser. Otherwise it opens the
+profile and requests `GET /api/auth/session` and
+`GET /user/auth_token?refresh=true`, then saves whatever cookie comes back.
+That can roll a cookie that is still accepted. It cannot recover one that
+has already expired. Schedule `mfp-mcp keepalive` for that. The profile is
+another copy of the session cookie on disk.
 
 ```bash
 uvx --from 'mfp-mcp[autorefresh]' playwright install chromium
@@ -275,9 +315,10 @@ internet. Write tools stay off unless `MFP_ALLOW_WRITES=1`.
 - **403 / Cloudflare blocked**: try `MFP_IMPERSONATE=chrome124` (or another
   [curl_cffi target](https://github.com/lexiforest/curl_cffi#supported-browsers)).
   Datacenter IPs get challenged far more than residential ones.
-- **"Session expired"**: confirm with `mfp-mcp auth --check`, then re-run
-  `mfp-mcp auth`, or set `MFP_AUTOREFRESH=1` and use
-  [auto-refresh](#auto-refresh-off-unless-you-opt-in).
+- **"Session expired"** or **"already dead"**: the saved cookie aged out
+  (about 1–2 hours without keepalive). Run `mfp-mcp auth` with a fresh
+  cookie, then keep `mfp-mcp keepalive --loop --interval 20m` running.
+  `mfp-mcp auth --check` reports the saved session without changing it.
 - **"Write tools are disabled"**: expected unless `MFP_ALLOW_WRITES=1`.
 - **"is not enabled"**: `MFP_WRITE_TOOLS` does not name that tool. `food` is log, edit, and delete only.
 - **"couldn't read your MyFitnessPal profile"**: MFP's profile endpoint 500s
