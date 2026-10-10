@@ -112,7 +112,9 @@ MCP client JSON file. The server is read-only until you set
 `MFP_ALLOW_WRITES=1`. To let an assistant log, edit, and delete food and
 nothing else, set `MFP_WRITE_TOOLS=food` as well. That alias enables
 `fitness_log_food`, `fitness_delete_food`, and `fitness_modify_food`.
-`fitness_search_food` stays available because it is a read tool. Water,
+`fitness_search_food`, `fitness_find_food`, and the My Foods, saved meals,
+recipes, recent, and frequent reads stay available because they are read
+tools. Water,
 weight, notes, exercise deletes, and the local feel, pin, and draft tools
 stay off and are not listed.
 
@@ -142,9 +144,15 @@ Then set `MFP_AUTOREFRESH=1` in the client config as well
 | Tool | What it does |
 | --- | --- |
 | `fitness_get_day` | Nutrition totals, diary entries, the MFP daily note, and feel note for a day |
-| `fitness_search_food` | Candidate matches with brand, calories, macros, serving, and ids |
+| `fitness_search_food` | Your foods, meals, recipes, recents, and frequents first, then the public database. Each hit has `source` and the ids to log it |
+| `fitness_find_food` | Same search as `fitness_search_food` |
+| `fitness_list_my_foods` | Foods you created, with calories, macros, servings, and ids |
+| `fitness_list_my_meals` | Saved meals and each food in them |
+| `fitness_list_my_recipes` | Your recipes, with servings and the ids used to log them |
+| `fitness_list_recent_foods` | Recent foods from the add-food tabs, including the last serving count |
+| `fitness_list_frequent_foods` | Frequent foods from the add-food tabs |
 | `fitness_draft_food` | Numbered options with every serving size, filtered/ranked by optional calorie and macro targets |
-| `fitness_log_food` | Log a draft option (and serving), a remembered food, or exact ids to the real diary |
+| `fitness_log_food` | Log a draft option, a My Food, a recipe, a saved meal, a remembered food, or exact ids |
 | `fitness_list_food_pins` | Remembered query → food/serving choices (local) |
 | `fitness_clear_food_pin` | Forget one remembered choice, or all of them |
 | `fitness_delete_food` | Remove a diary entry by name match |
@@ -175,17 +183,32 @@ depends on MyFitnessPal's search order:
 3. Next time, `fitness_log_food(query="greek yogurt")` logs the remembered
    food and serving without searching.
 
-A bare `fitness_log_food(query=...)` with nothing remembered logs only when
-exactly one result matches the name exactly; otherwise it logs nothing and
-returns a draft to choose from. Remembered choices live in the local cache
-(`fitness_list_food_pins`, `fitness_clear_food_pin`). Drafts expire after 24
-hours.
+A bare `fitness_log_food(query=...)` checks a remembered choice first, then
+your My Foods, saved meals, recipes, recent foods, and frequent foods, and
+only then the public database. An exact name, or a single close name, from
+those personal sources is logged. A saved-meal match adds every food in the
+meal. A recipe match adds one diary line, and `quantity` is how many
+servings. If several personal items match, nothing is logged and the draft
+includes `personal_matches`. If nothing personal matches, a single exact
+public name is logged; otherwise nothing is logged and a draft comes back.
+Remembered choices live in the local cache (`fitness_list_food_pins`,
+`fitness_clear_food_pin`). Drafts expire after 24 hours.
+
+Log a known personal id without searching:
+
+- `fitness_log_food(my_food_id=..., quantity=2)` logs that My Food.
+- `fitness_log_food(recipe_id=..., quantity=2)` logs two servings of the
+  recipe as one diary line.
+- `fitness_log_food(saved_meal_id=..., quantity=1)` logs every food in the
+  saved meal. `quantity` multiplies each food's own quantity (a tea saved as
+  2 servings is logged as 2). `meal` is still the diary section, such as
+  breakfast.
 
 `fitness_modify_food` picks the replacement the same way, before deleting
-anything: a remembered food or a single exact-name match is used directly;
-otherwise the entry is left alone and a draft comes back — call
-`fitness_modify_food` again with the same `query` plus `draft_id` and
-`option`.
+anything: a remembered food, a single personal match, or a single exact
+public name is used directly; otherwise the entry is left alone and a draft
+comes back — call `fitness_modify_food` again with the same `query` plus
+`draft_id` and `option`.
 
 `fitness_log_food`, `fitness_delete_food`, and `fitness_modify_food` all take
 a `meal` argument the same way: `breakfast`/`lunch`/`dinner`/`snacks`, or the

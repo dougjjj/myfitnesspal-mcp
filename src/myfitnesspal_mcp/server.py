@@ -10,7 +10,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from . import config, diary, food_logging, mfp_client, refresh, sync
+from . import config, diary, food_logging, mfp_client, personal, refresh, sync
 from .food_ranking import MacroTargets
 from .store import Store, trend_column
 
@@ -21,6 +21,12 @@ READ_TOOLS = frozenset(
     {
         "fitness_get_day",
         "fitness_search_food",
+        "fitness_find_food",
+        "fitness_list_my_foods",
+        "fitness_list_my_meals",
+        "fitness_list_my_recipes",
+        "fitness_list_recent_foods",
+        "fitness_list_frequent_foods",
         "fitness_list_food_pins",
         "fitness_get_exercise",
         "fitness_get_exercise_entries",
@@ -43,8 +49,10 @@ WRITE_TOOLS = frozenset(
         "fitness_log_feel",
     }
 )
-# `food` enables diary log/edit/delete. Search stays available because it is
-# a read tool. Draft, pins, feel, water, weight, notes, and exercise stay off.
+# `food` enables diary log/edit/delete, including a saved meal logged through
+# fitness_log_food. Search and the personal-library reads stay available
+# because they are read tools. Draft, pins, feel, water, weight, notes, and
+# exercise stay off.
 FOOD_WRITE_TOOLS = frozenset(
     {
         "fitness_log_food",
@@ -255,21 +263,119 @@ async def fitness_get_day(date: str | None = None, ctx: Context = None) -> dict:
     return await with_session(ctx, op)
 
 
+async def _find_food(query, limit, with_macros, ctx):
+    def op(store, client):
+        return {
+            "query": query,
+            "results": personal.find_food(client, query, limit, with_macros),
+        }
+
+    return await with_session(ctx, op)
+
+
 @mcp.tool(annotations=_READ_ONLY)
 async def fitness_search_food(
     query: str, limit: int = 5, with_macros: bool = True, ctx: Context = None
 ) -> dict:
-    """Search MyFitnessPal's food database and return candidate matches.
+    """Search the user's foods, meals, recipes, and recents before the public database.
 
-    Each candidate has name, brand, calories, macros, serving, and the
-    food_id + weight_id to pass to fitness_log_food to log exactly that item.
+    Personal hits rank first. Each result has name, calories, protein, carbs,
+    fat, serving, and source: my_food, my_meal, my_recipe, recent, frequent,
+    or public. Ids for logging are included: food_id + version (My Food or
+    recent), recipe_id, or meal_id. A recent result's quantity is how many
+    servings were last logged. fitness_find_food returns the same results.
+    """
+    return await _find_food(query, limit, with_macros, ctx)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def fitness_find_food(
+    query: str, limit: int = 5, with_macros: bool = True, ctx: Context = None
+) -> dict:
+    """Same search as fitness_search_food.
+
+    The user's My Foods, saved meals, recipes, recent foods, and frequent
+    foods rank ahead of the public database. Every result has a source field.
+    """
+    return await _find_food(query, limit, with_macros, ctx)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def fitness_list_my_foods(
+    search: str = "", limit: int = 50, ctx: Context = None
+) -> dict:
+    """List foods the user created (My Foods).
+
+    search: optional name filter. limit: max items (default 50).
+    Each item has name, calories, protein, carbs, fat, servings, food_id,
+    version, and weight_id. Log one with fitness_log_food(my_food_id=...).
     """
 
     def op(store, client):
-        return {
-            "query": query,
-            "results": diary.search_food(client, query, limit, with_macros),
-        }
+        return {"items": personal.list_my_foods(client, search, limit)}
+
+    return await with_session(ctx, op)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def fitness_list_my_meals(
+    search: str = "", limit: int = 50, ctx: Context = None
+) -> dict:
+    """List saved meals (My Meals) and the foods in each one.
+
+    Each meal has meal_id, name, calories, macros, and foods. A food that
+    MyFitnessPal returned without ids is still listed by name. Log every
+    item with fitness_log_food(saved_meal_id=...).
+    """
+
+    def op(store, client):
+        return {"items": personal.list_my_meals(client, search, limit)}
+
+    return await with_session(ctx, op)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def fitness_list_my_recipes(
+    search: str = "", limit: int = 50, ctx: Context = None
+) -> dict:
+    """List the user's recipes.
+
+    Each recipe has recipe_id, name, calories, macros, serving, and the
+    food_id + weight_id used to log it. Log with
+    fitness_log_food(recipe_id=..., quantity=<servings>). quantity is how
+    many servings to add, as one diary line.
+    """
+
+    def op(store, client):
+        return {"items": personal.list_my_recipes(client, search, limit)}
+
+    return await with_session(ctx, op)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def fitness_list_recent_foods(limit: int = 50, ctx: Context = None) -> dict:
+    """Foods from the diary add-food Recent tabs.
+
+    quantity is the last logged serving count. food_id, version, and
+    weight_id are enough to log the food.
+    """
+
+    def op(store, client):
+        return {"items": personal.list_recent_foods(client, limit)}
+
+    return await with_session(ctx, op)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def fitness_list_frequent_foods(limit: int = 50, ctx: Context = None) -> dict:
+    """Foods from the diary add-food Frequent tabs.
+
+    Each item has name, calories, macros, serving, food_id, version, and
+    weight_id.
+    """
+
+    def op(store, client):
+        return {"items": personal.list_frequent_foods(client, limit)}
 
     return await with_session(ctx, op)
 
@@ -334,27 +440,45 @@ async def fitness_log_food(
     option: int | None = None,
     serving: int | None = None,
     pin: bool = True,
+    my_food_id: str | None = None,
+    recipe_id: str | None = None,
+    saved_meal_id: str | None = None,
     food_id: str | None = None,
     weight_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Log a food to the real MyFitnessPal diary.
+    """Log a food, recipe, or saved meal to the real MyFitnessPal diary.
 
     Preferred: pick from a fitness_draft_food draft with draft_id + option
     (+ serving, default the option's suggested_serving). meal, quantity, and
     date default to the draft's. pin=True remembers the choice so logging
     the same query later reuses this food and serving.
 
-    With only `query`: logs a pinned food, or the single exact-name match;
-    otherwise nothing is logged and a draft is returned (needs_choice=true)
-    to pick from. With food_id + weight_id (from fitness_search_food): logs
-    exactly that item, `query` being its display name.
+    my_food_id logs that My Food (first serving size). recipe_id logs the
+    recipe as one diary line; quantity is the number of servings.
+    saved_meal_id logs every food in the saved meal. Each component's own
+    quantity is multiplied by quantity. meal is the diary section
+    (breakfast, lunch, dinner, snacks, or a custom meal name), not the
+    saved meal.
+
+    With only `query`: a remembered pin wins. Otherwise an exact personal
+    name, or a single close personal name, is logged (a meal match logs the
+    whole meal; a recipe match logs that many servings). Several personal
+    matches log nothing and return a draft plus personal_matches. If nothing
+    personal matches, a single exact public name is logged; otherwise nothing
+    is logged and a draft is returned (needs_choice=true).
+
+    food_id + weight_id (a public search hit) logs that item. `query` is its
+    display name.
 
     meal: breakfast|lunch|dinner|snacks (default breakfast) or any meal name
     on the account. quantity: number of servings (default 1).
     date: YYYY-MM-DD (default today).
     """
     explicit_day = parse_day(date) if date else None
+    day = explicit_day or parse_day(None)
+    chosen_meal = meal or "breakfast"
+    chosen_quantity = 1.0 if quantity is None else quantity
 
     def op(store, client):
         if draft_id is not None:
@@ -371,6 +495,18 @@ async def fitness_log_food(
                 day=explicit_day,
                 pin=pin,
             )
+        elif my_food_id:
+            result = personal.log_my_food(
+                client, my_food_id, day, chosen_meal, chosen_quantity
+            )
+        elif recipe_id:
+            result = personal.log_recipe(
+                client, recipe_id, day, chosen_meal, chosen_quantity
+            )
+        elif saved_meal_id:
+            result = personal.log_saved_meal(
+                client, saved_meal_id, day, chosen_meal, chosen_quantity
+            )
         elif food_id is not None and weight_id is not None:
             food = {
                 "food_id": food_id,
@@ -380,9 +516,9 @@ async def fitness_log_food(
             logged = food_logging.log_exact(
                 client,
                 food,
-                explicit_day or parse_day(None),
-                meal or "breakfast",
-                1.0 if quantity is None else quantity,
+                day,
+                chosen_meal,
+                chosen_quantity,
             )
             result = {**logged, "source": "ids"}
         elif query:
@@ -390,12 +526,15 @@ async def fitness_log_food(
                 client,
                 store,
                 query,
-                explicit_day or parse_day(None),
-                meal or "breakfast",
-                1.0 if quantity is None else quantity,
+                day,
+                chosen_meal,
+                chosen_quantity,
             )
         else:
-            raise ValueError("pass draft_id + option, food_id + weight_id, or query")
+            raise ValueError(
+                "pass draft_id + option, my_food_id, recipe_id, saved_meal_id, "
+                "food_id + weight_id, or query"
+            )
         return result
 
     result = await with_session(ctx, op)
@@ -474,10 +613,12 @@ async def fitness_modify_food(
     none is an exact name match), the error lists the candidates; narrow `query`
     to pick one.
     new_query: the food to add instead; omit to re-add `query` (e.g. to change
-    quantity). The replacement is chosen like fitness_log_food's: a pinned
-    food or a single exact-name match is used directly; otherwise nothing is
-    changed and a draft comes back (needs_choice=true) — call again with the
-    same query plus draft_id + option (and optionally serving).
+    quantity). The replacement is chosen like fitness_log_food's query path:
+    a pin, then an exact or single close match from My Foods, saved meals,
+    recipes, recents, and frequents, then a single exact public name.
+    Otherwise nothing is changed and a draft comes back (needs_choice=true)
+    — call again with the same query plus draft_id + option (and optionally
+    serving).
     meal: breakfast|lunch|dinner|snacks or any meal name on the account,
     used for both the delete and the add. quantity: servings (default 1, or
     the draft's). date: YYYY-MM-DD (default: today).

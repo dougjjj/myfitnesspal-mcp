@@ -1,0 +1,25 @@
+{
+  "items": [
+    {
+      "quantity": 1,
+      "food": {
+        "id": "mix-1",
+        "version": "mix-v1",
+        "description": "Pancake mix",
+        "brand_name": "",
+        "nutritional_contents": {
+          "energy": {"value": 180},
+          "protein": 4,
+          "carbohydrates": 32,
+          "fat": 3
+        }
+      },
+      "weight": {
+        "id": "w-mix",
+        "unit": "serving",
+        "value": 1,
+        "nutrition_multiplier": 1
+      }
+    }
+  ]
+}

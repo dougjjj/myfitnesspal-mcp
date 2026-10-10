@@ -1,0 +1,90 @@
+[
+  {
+    "id": "tea-1",
+    "version": "tea-v1",
+    "brand_name": "",
+    "description": "English Breakfast Tea with Milk",
+    "public": false,
+    "type": "food",
+    "verified": false,
+    "serving_sizes": [
+      {
+        "id": "w-tea",
+        "value": 1,
+        "unit": "serving",
+        "nutrition_multiplier": 1,
+        "index": 0
+      }
+    ],
+    "nutritional_contents": {
+      "energy": {"unit": "calories", "value": 6},
+      "protein": 0.2,
+      "carbohydrates": 1,
+      "fat": 0.1
+    }
+  },
+  {
+    "id": "oats-1",
+    "version": "oats-v1",
+    "brand_name": "",
+    "description": "Overnight Oats",
+    "public": false,
+    "serving_sizes": [
+      {
+        "id": "w-oats",
+        "value": 1,
+        "unit": "jar",
+        "nutrition_multiplier": 1,
+        "index": 0
+      }
+    ],
+    "nutritional_contents": {
+      "energy": {"unit": "calories", "value": 340},
+      "protein": 12,
+      "carbohydrates": 48,
+      "fat": 9
+    }
+  },
+  {
+    "id": "green-1",
+    "version": "green-v1",
+    "brand_name": "",
+    "description": "Green Tea",
+    "public": false,
+    "serving_sizes": [
+      {
+        "id": "w-green",
+        "value": 1,
+        "unit": "serving",
+        "nutrition_multiplier": 1
+      }
+    ],
+    "nutritional_contents": {
+      "energy": {"value": 2},
+      "protein": 0,
+      "carbohydrates": 0,
+      "fat": 0
+    }
+  },
+  {
+    "id": "black-1",
+    "version": "black-v1",
+    "brand_name": "",
+    "description": "Black Tea",
+    "public": false,
+    "serving_sizes": [
+      {
+        "id": "w-black",
+        "value": 1,
+        "unit": "serving",
+        "nutrition_multiplier": 1
+      }
+    ],
+    "nutritional_contents": {
+      "energy": {"value": 2},
+      "protein": 0,
+      "carbohydrates": 0,
+      "fat": 0
+    }
+  }
+]
