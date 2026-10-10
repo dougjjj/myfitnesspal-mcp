@@ -52,6 +52,9 @@ All notable changes to this project are documented here. The format follows
   `warnings` field naming the endpoint that did not respond.
 - A recipe list includes calories, macros, and `recipe_servings` when that
   list page already includes them. Listing recipes does not open each one.
+- `mfp-mcp keepalive` can run a second time. Playwright rejects a
+  `__Host-` cookie that sets both `url` and `path`, and the harvested
+  csrf cookie triggered that on every run after the first.
 - Headless refresh requests the session poll and `/user/auth_token?refresh=true`
   instead of the homepage. The homepage visit did not wait for the website's
   120-second session poll, so it did not roll the cookie. When `cookies.json`

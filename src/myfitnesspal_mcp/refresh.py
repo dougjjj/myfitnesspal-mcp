@@ -167,12 +167,15 @@ def _cookie_payloads(cookies: dict[str, str]) -> list[dict]:
     for name, value in cookies.items():
         if not name or value is None:
             continue
-        item = {"name": name, "value": value, "path": "/", "secure": True}
-        # __Host- cookies are rejected when a Domain attribute is set.
+        item = {"name": name, "value": value, "secure": True}
+        # __Host- cookies are host-only, so they cannot carry a Domain.
+        # Playwright rejects a cookie that sets both url and path, which is
+        # what broke the second keepalive once cookies.json held the csrf cookie.
         if name.startswith("__Host-"):
             item["url"] = ORIGIN
         else:
             item["domain"] = ".myfitnesspal.com"
+            item["path"] = "/"
         payloads.append(item)
     return payloads
 

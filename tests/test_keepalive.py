@@ -70,10 +70,50 @@ def test_chunked_session_cookie_and_host_prefix():
         }
     )
     by_name = {item["name"]: item for item in payloads}
-    assert by_name[auth.SESSION_COOKIE]["domain"] == ".myfitnesspal.com"
+    session = by_name[auth.SESSION_COOKIE]
+    assert session["domain"] == ".myfitnesspal.com"
+    assert session["path"] == "/"
+    assert "url" not in session
     host_cookie = by_name["__Host-next-auth.csrf-token"]
     assert "domain" not in host_cookie
+    assert "path" not in host_cookie
     assert host_cookie["url"] == refresh.ORIGIN
+
+
+def test_second_keepalive_reseeds_harvested_host_cookie(cookie_file, monkeypatch):
+    """The first harvest includes the csrf cookie; the next run must reseed it."""
+    auth.save_cookies({auth.SESSION_COOKIE: "session-old"}, username="tester")
+    harvested = {
+        auth.SESSION_COOKIE: "rotated-session",
+        "__Host-next-auth.csrf-token": "csrf-value",
+        "__Secure-next-auth.callback-url": "https://www.myfitnesspal.com/",
+    }
+    seeds = []
+
+    def rotate(seed):
+        seeds.append(dict(seed or {}))
+        return dict(harvested), [LIVE_SESSION, LIVE_TOKEN]
+
+    monkeypatch.setattr(refresh, "_rotate_session", rotate)
+    assert refresh.run_keepalive() == 0
+    assert refresh.run_keepalive() == 0
+
+    assert "__Host-next-auth.csrf-token" not in seeds[0]
+    assert seeds[1]["__Host-next-auth.csrf-token"] == "csrf-value"
+    assert seeds[1][auth.SESSION_COOKIE] == "rotated-session"
+    payloads = refresh._cookie_payloads(seeds[1])
+    assert not any("url" in item and "path" in item for item in payloads)
+    host_cookie = next(
+        item for item in payloads if item["name"] == "__Host-next-auth.csrf-token"
+    )
+    assert host_cookie["url"] == refresh.ORIGIN
+    assert "path" not in host_cookie
+    session = next(item for item in payloads if item["name"] == auth.SESSION_COOKIE)
+    assert session["path"] == "/"
+    assert "url" not in session
+    saved = json.loads(cookie_file.read_text())
+    assert saved["cookies"]["__Host-next-auth.csrf-token"] == "csrf-value"
+    assert saved["username"] == "tester"
 
 
 def test_rotation_urls_match_the_website_poll_and_the_client_exchange():
