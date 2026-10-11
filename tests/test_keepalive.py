@@ -27,6 +27,8 @@ def cookie_file(tmp_path, monkeypatch):
     monkeypatch.setattr(refresh, "playwright_installed", lambda: True)
     monkeypatch.setattr(refresh, "profile_seeded", lambda: True)
     monkeypatch.setattr(refresh, "profile_dir", lambda: tmp_path / "browser-profile")
+    status = tmp_path / "keepalive.status"
+    monkeypatch.setattr(refresh, "keepalive_status_path", lambda: status)
     return path
 
 
@@ -147,26 +149,38 @@ def test_keepalive_writes_rotated_cookie_privately(cookie_file, monkeypatch, cap
 
 
 def test_keepalive_dead_session_keeps_the_saved_cookie(
-    cookie_file, monkeypatch, capsys
+    cookie_file, tmp_path, monkeypatch, capsys
 ):
     auth.save_cookies({auth.SESSION_COOKIE: "session-old"}, username="tester")
     before = cookie_file.read_text()
+    calls = []
 
-    def rotate(seed):
+    def rotate(seed, *, remint=False):
+        calls.append(remint)
         return {auth.SESSION_COOKIE: "still-there"}, [
             {"status": 200, "content_type": "application/json", "body": "null"},
             {"status": 200, "content_type": "text/html", "body": "<html></html>"},
         ]
 
     monkeypatch.setattr(refresh, "_rotate_session", rotate)
+    monkeypatch.setattr(refresh, "api_cookies_still_valid", lambda cookies: False)
     assert refresh.run_keepalive() == 1
 
+    assert calls == [False]
     assert cookie_file.read_text() == before
     captured = capsys.readouterr()
-    assert "already dead" in captured.err
+    assert "logged out" in captured.err
+    assert "left unchanged" in captured.err
     assert "mfp-mcp auth" in captured.err
     assert "still-there" not in captured.err
     assert "still-there" not in captured.out
+    status_path = tmp_path / "keepalive.status"
+    status = json.loads(status_path.read_text())
+    assert status["consecutive_failures"] == 1
+    assert status["last_success"] is None
+    assert "session-old" not in status["last_error"]
+    assert "still-there" not in status["last_error"]
+    assert status_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_keepalive_missing_profile_does_not_open_a_browser(
@@ -183,24 +197,37 @@ def test_keepalive_missing_profile_does_not_open_a_browser(
     assert not cookie_file.exists()
 
 
-def test_keepalive_loop_stops_when_the_session_dies(cookie_file, monkeypatch):
+def test_keepalive_loop_retries_until_stopped(
+    cookie_file, tmp_path, monkeypatch, capsys
+):
     calls = {"n": 0}
     slept = []
 
     def once():
         calls["n"] += 1
-        if calls["n"] == 1:
-            return True, "refreshed"
-        return False, "MyFitnessPal session is already dead"
+        if calls["n"] < 5:
+            return False, "could not confirm"
+        return True, "refreshed"
+
+    def sleep(seconds):
+        slept.append(seconds)
+        return calls["n"] >= 5
 
     monkeypatch.setattr(refresh, "keepalive_once", once)
-    monkeypatch.setattr(
-        refresh, "_sleep", lambda seconds: slept.append(seconds) or False
-    )
+    monkeypatch.setattr(refresh, "_sleep", sleep)
 
-    assert refresh.run_keepalive(loop=True, interval=1200) == 1
-    assert calls["n"] == 2
-    assert slept == [1200]
+    assert refresh.run_keepalive(loop=True, interval=1200, max_failures=2) == 0
+    assert calls["n"] == 5
+    assert slept == [120, 300, 600, 1200, 1200]
+    captured = capsys.readouterr()
+    assert "keepalive alert: 2 consecutive failures" in captured.err
+    assert "keepalive alert: 4 consecutive failures" in captured.err
+    assert "keepalive alert: 5" not in captured.err
+    status = json.loads((tmp_path / "keepalive.status").read_text())
+    assert status["consecutive_failures"] == 0
+    assert status["last_success"].endswith("Z")
+    assert status["last_error"] is None
+    assert "alert" not in status
 
 
 def test_keepalive_loop_exits_cleanly_when_stopped(cookie_file, monkeypatch):
@@ -212,9 +239,10 @@ def test_keepalive_loop_exits_cleanly_when_stopped(cookie_file, monkeypatch):
 def test_keepalive_command_parses_loop_interval(monkeypatch):
     seen = {}
 
-    def run(*, loop, interval):
+    def run(*, loop, interval, max_failures):
         seen["loop"] = loop
         seen["interval"] = interval
+        seen["max_failures"] = max_failures
         return 0
 
     monkeypatch.setattr(
@@ -224,7 +252,7 @@ def test_keepalive_command_parses_loop_interval(monkeypatch):
     with pytest.raises(SystemExit) as exit_info:
         cli.main()
     assert exit_info.value.code == 0
-    assert seen == {"loop": True, "interval": 1200}
+    assert seen == {"loop": True, "interval": 1200, "max_failures": None}
 
 
 def test_keepalive_interval_without_loop_is_rejected(monkeypatch):
@@ -232,6 +260,39 @@ def test_keepalive_interval_without_loop_is_rejected(monkeypatch):
     with pytest.raises(SystemExit) as exit_info:
         cli.main()
     assert exit_info.value.code == 2
+
+
+def test_keepalive_max_failures_requires_loop(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["mfp-mcp", "keepalive", "--max-failures", "3"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    assert exit_info.value.code == 2
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["mfp-mcp", "keepalive", "--loop", "--max-failures", "0"],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    assert exit_info.value.code == 2
+
+
+def test_keepalive_command_parses_max_failures(monkeypatch):
+    seen = {}
+
+    def run(*, loop, interval, max_failures):
+        seen["max_failures"] = max_failures
+        seen["loop"] = loop
+        return 0
+
+    monkeypatch.setattr(
+        sys, "argv", ["mfp-mcp", "keepalive", "--loop", "--max-failures", "3"]
+    )
+    monkeypatch.setattr(refresh, "run_keepalive", run)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    assert exit_info.value.code == 0
+    assert seen == {"loop": True, "max_failures": 3}
 
 
 def test_client_reloads_when_cookie_file_mtime_changes(cookie_file, monkeypatch):
@@ -285,3 +346,202 @@ def test_env_cookie_ignores_a_rewritten_file(cookie_file, monkeypatch):
         assert mfp_client.get_client() is first
     finally:
         mfp_client.reset()
+
+
+LOGGED_OUT = {"status": 200, "content_type": "application/json", "body": "null"}
+
+
+def test_session_state_distinguishes_logout_from_transient_errors():
+    assert refresh.session_state(LOGGED_OUT) == refresh.LOGGED_OUT
+    assert (
+        refresh.session_state(
+            {"status": 200, "content_type": "application/json", "body": "{}"}
+        )
+        == refresh.LOGGED_OUT
+    )
+    assert refresh.session_state(LIVE_SESSION) == refresh.LIVE
+    assert (
+        refresh.session_state(
+            {"status": 503, "content_type": "text/html", "body": "unavailable"}
+        )
+        == refresh.TRANSIENT
+    )
+    assert (
+        refresh.session_state(
+            {
+                "status": 403,
+                "content_type": "text/html",
+                "body": "<html>Just a moment</html>",
+            }
+        )
+        == refresh.TRANSIENT
+    )
+    assert (
+        refresh.session_state(
+            {"status": 200, "content_type": "text/html", "body": "<html>login</html>"}
+        )
+        == refresh.TRANSIENT
+    )
+    assert refresh.failure_backoff(1, 1200) == 120
+    assert refresh.failure_backoff(2, 1200) == 300
+    assert refresh.failure_backoff(3, 1200) == 600
+    assert refresh.failure_backoff(4, 1200) == 1200
+    urls = refresh.navigation_urls(remint=True)
+    assert urls[0] == refresh.DIARY_URL
+    assert urls[0].endswith("/food/diary")
+    assert refresh.navigation_urls(remint=False) == list(refresh.ROTATION_URLS)
+
+
+def test_emit_flushes(monkeypatch):
+    seen = {}
+
+    def fake_print(*args, **kwargs):
+        seen["flush"] = kwargs.get("flush")
+        seen["file"] = kwargs.get("file")
+
+    monkeypatch.setattr("builtins.print", fake_print)
+    refresh._emit(False, "hello")
+    assert seen == {"flush": True, "file": sys.stderr}
+
+
+def test_transient_response_leaves_cookies_unchanged(cookie_file, monkeypatch, capsys):
+    auth.save_cookies({auth.SESSION_COOKIE: "session-old"}, username="tester")
+    before = cookie_file.read_text()
+
+    def rotate(seed):
+        return {auth.SESSION_COOKIE: "still-there"}, [
+            {"status": 503, "content_type": "text/html", "body": "unavailable"},
+            LIVE_TOKEN,
+        ]
+
+    def api_check(cookies):
+        raise AssertionError("transient result must not call the API check")
+
+    monkeypatch.setattr(refresh, "_rotate_session", rotate)
+    monkeypatch.setattr(refresh, "api_cookies_still_valid", api_check)
+    assert refresh.run_keepalive() == 1
+    assert cookie_file.read_text() == before
+    captured = capsys.readouterr()
+    assert "Cloudflare" in captured.err
+    assert "left unchanged" in captured.err
+    assert "mfp-mcp auth" not in captured.err
+
+
+def test_browser_error_is_transient_and_omits_the_exception(
+    cookie_file, tmp_path, monkeypatch, capsys
+):
+    auth.save_cookies({auth.SESSION_COOKIE: "session-old"})
+
+    def rotate(seed):
+        raise RuntimeError("cookie=session-old")
+
+    monkeypatch.setattr(refresh, "_rotate_session", rotate)
+    assert refresh.run_keepalive() == 1
+    captured = capsys.readouterr()
+    assert "Cloudflare" in captured.err
+    assert "session-old" not in captured.err
+    assert "session-old" not in captured.out
+    status = json.loads((tmp_path / "keepalive.status").read_text())
+    assert "session-old" not in status["last_error"]
+
+
+def test_keepalive_seeds_the_full_jar_even_when_env_is_one_token(
+    cookie_file, monkeypatch, capsys
+):
+    auth.save_cookies(
+        {
+            auth.SESSION_COOKIE: "session-old",
+            "p": "legacy-session",
+            "known_user": "1",
+            "_mfp_session": "server-session",
+            "__Host-next-auth.csrf-token": "csrf-value",
+        },
+        username="tester",
+    )
+    monkeypatch.setenv("MFP_COOKIE", "env-token-only")
+    seen = {}
+
+    def rotate(seed):
+        seen["seed"] = dict(seed)
+        return {
+            auth.SESSION_COOKIE: "rotated-session",
+            "p": "legacy-session",
+        }, [LIVE_SESSION, LIVE_TOKEN]
+
+    monkeypatch.setattr(refresh, "_rotate_session", rotate)
+    assert refresh.run_keepalive() == 0
+    assert seen["seed"][auth.SESSION_COOKIE] == "session-old"
+    assert seen["seed"]["p"] == "legacy-session"
+    assert seen["seed"]["_mfp_session"] == "server-session"
+    assert seen["seed"]["__Host-next-auth.csrf-token"] == "csrf-value"
+    assert "env-token-only" not in seen["seed"].values()
+    payloads = refresh._cookie_payloads(seen["seed"])
+    assert not any("url" in item and "path" in item for item in payloads)
+    saved = json.loads(cookie_file.read_text())["cookies"]
+    assert saved[auth.SESSION_COOKIE] == "rotated-session"
+    assert saved["p"] == "legacy-session"
+    assert saved["known_user"] == "1"
+    assert saved["_mfp_session"] == "server-session"
+    assert saved["__Host-next-auth.csrf-token"] == "csrf-value"
+    assert "MFP_COOKIE" in capsys.readouterr().out
+
+
+def test_logged_out_session_remints_when_the_jar_still_passes(cookie_file, monkeypatch):
+    auth.save_cookies(
+        {
+            auth.SESSION_COOKIE: "session-old",
+            "p": "legacy-session",
+            "known_user": "1",
+        }
+    )
+    calls = []
+
+    def rotate(seed, *, remint=False):
+        calls.append(remint)
+        assert seed["p"] == "legacy-session"
+        if not remint:
+            return (
+                {auth.SESSION_COOKIE: "session-old", "p": "legacy-session"},
+                [LOGGED_OUT, LIVE_TOKEN],
+            )
+        return (
+            {auth.SESSION_COOKIE: "minted", "p": "legacy-session"},
+            [LIVE_SESSION, LIVE_TOKEN],
+        )
+
+    monkeypatch.setattr(refresh, "_rotate_session", rotate)
+    monkeypatch.setattr(refresh, "api_cookies_still_valid", lambda cookies: True)
+    assert refresh.run_keepalive() == 0
+    assert calls == [False, True]
+    saved = json.loads(cookie_file.read_text())["cookies"]
+    assert saved[auth.SESSION_COOKIE] == "minted"
+    assert saved["p"] == "legacy-session"
+    assert saved["known_user"] == "1"
+
+
+def test_remint_that_stays_logged_out_leaves_the_jar(cookie_file, monkeypatch, capsys):
+    auth.save_cookies({auth.SESSION_COOKIE: "session-old", "p": "legacy-session"})
+    before = cookie_file.read_text()
+    calls = []
+
+    def rotate(seed, *, remint=False):
+        calls.append(remint)
+        return {auth.SESSION_COOKIE: "session-old"}, [
+            {"status": 200, "content_type": "application/json", "body": "{}"},
+            LIVE_TOKEN,
+        ]
+
+    monkeypatch.setattr(refresh, "_rotate_session", rotate)
+    monkeypatch.setattr(
+        refresh,
+        "api_cookies_still_valid",
+        lambda cookies: cookies["p"] == "legacy-session",
+    )
+    assert refresh.run_keepalive() == 1
+    assert calls == [False, True]
+    assert cookie_file.read_text() == before
+    captured = capsys.readouterr()
+    assert "diary" in captured.err
+    assert "left unchanged" in captured.err
+    assert "mfp-mcp auth" not in captured.err
+    assert "legacy-session" not in captured.err

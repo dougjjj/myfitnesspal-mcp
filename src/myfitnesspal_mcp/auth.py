@@ -39,11 +39,24 @@ def _read_saved() -> dict:
     return json.loads(path.read_text())
 
 
+def stored_cookies() -> dict[str, str]:
+    """The full jar in cookies.json.
+
+    `MFP_COOKIE` is one token and hides this file from `load_cookies`.
+    Keepalive has to seed the browser with every saved cookie, because the
+    API exchange can still succeed after the NextAuth token alone has expired.
+    """
+    saved = _read_saved().get("cookies")
+    if not isinstance(saved, dict):
+        return {}
+    return {str(name): str(value) for name, value in saved.items() if value is not None}
+
+
 def load_cookies() -> dict[str, str] | None:
     env = config.cookie_env()
     if env:
         return parse_cookie_input(env)
-    saved = _read_saved().get("cookies")
+    saved = stored_cookies()
     if saved:
         return saved
     return None
