@@ -19,8 +19,12 @@ All notable changes to this project are documented here. The format follows
 - `mfp-mcp keepalive` opens the seeded browser profile, requests
   `GET /api/auth/session` and `GET /user/auth_token?refresh=true`, and
   writes the rotated cookie to `cookies.json` (mode `0600`).
-  `keepalive --loop --interval 20m` repeats until the session is dead.
-  A dead session exits non-zero and leaves the saved cookie in place.
+  `keepalive --loop --interval 20m` keeps refreshing until the process is
+  stopped. A failed refresh is logged and retried (2, 5, then 10 minutes,
+  then the interval). Each attempt writes `keepalive.status` (mode `0600`)
+  with `last_success`, `last_error`, and `consecutive_failures`.
+  `--max-failures N` prints an alert and does not stop the loop. A one-shot
+  `mfp-mcp keepalive` still exits non-zero when the refresh fails.
 
 ### Changed
 
@@ -39,6 +43,13 @@ All notable changes to this project are documented here. The format follows
 - A running server re-reads `cookies.json` when the file's modification
   time changes, so `mfp-mcp keepalive` in another process updates the next
   tool call. `MFP_COOKIE`, when set, still overrides the file.
+- `mfp-mcp keepalive` seeds the browser from the full `cookies.json` jar
+  on every run, including when `MFP_COOKIE` is set to a single token, and
+  merges the harvest back so cookies the browser omits stay in the file.
+  A Cloudflare challenge or an HTTP 5xx is retried. Only
+  `GET /api/auth/session` returning HTTP 200 `null` or `{}` is logged out.
+  When that happens and the jar still passes the API check, keepalive opens
+  the diary once to try to mint a new NextAuth cookie. Log lines are flushed.
 
 ### Fixed
 

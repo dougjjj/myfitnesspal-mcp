@@ -19,22 +19,40 @@ provided by your browser". The persistent profile holds the same cookie, so
 opening it after expiry cannot log in again.
 
 `__Host-next-auth.csrf-token` and `__Secure-next-auth.callback-url` are
-sign-in bookkeeping. The session poll and the auth-token exchange
-authenticate with the session cookie. The web app deletes the legacy
-`known_user` cookie on logout; the exchange does not read it.
+sign-in bookkeeping. `GET /api/auth/session` decides the NextAuth cookie
+alone: HTTP 200 with `null` or `{}` means that cookie is logged out.
 
-Keepalive therefore loads the seeded profile, requests those two URLs while
-the cookie is still valid, and writes the profile's cookies back to
-cookies.json. A homepage visit plus a few seconds does not wait for the
-120-second poll, so it does not roll the cookie.
+`GET /user/auth_token?refresh=true` is a different check. Its JSON body
+carries an API `access_token` and `refresh_token` for api.myfitnesspal.com.
+That `refresh_token` is not a NextAuth session, and nothing in the public
+site turns it into `Set-Cookie` for `__Secure-next-auth.session-token`
+(minting that cookie needs the server's NextAuth secret). The client bundle's
+`/api/auth/refresh-token-data` route is a test double. python-myfitnesspal
+reads the JSON and does not store the refresh token.
+
+On a live account the full `cookies.json` jar still passed that API exchange
+after the bare NextAuth token failed. The extra credential is some other
+cookie in the jar (the legacy Rails session `p` is the long-lived one the
+old site used; `known_user` is only a "this browser has logged in" flag the
+web app deletes on logout; `_mfp_session`, when present, is set by the
+server and is not named in the public page scripts). Keepalive therefore
+seeds the browser with the whole file, and if the session poll is logged
+out while the jar still passes the API check, it opens the diary so the
+site can bridge that jar into a new NextAuth cookie.
+
+A Cloudflare challenge or an HTTP 5xx is not a logged-out session. The
+loop logs it and retries. It exits when the process is stopped, not when
+a refresh fails.
 """
 
 import json
+import os
 import re
 import signal
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib import parse
 
@@ -46,9 +64,25 @@ SESSION_POLL_URL = parse.urljoin(ORIGIN, "api/auth/session")
 # The exchange this server uses to build a client. refresh=true asks MFP
 # to rotate the API token while the session cookie is still accepted.
 AUTH_TOKEN_URL = parse.urljoin(ORIGIN, "user/auth_token") + "?refresh=true"
+# A logged-in diary page is the request that can Set-Cookie a new NextAuth
+# session when a legacy cookie still identifies the account.
+DIARY_URL = parse.urljoin(ORIGIN, "food/diary")
 ROTATION_URLS = (SESSION_POLL_URL, AUTH_TOKEN_URL)
 DEFAULT_LOOP_SECONDS = 20 * 60
 _MIN_LOOP_SECONDS = 60
+# After a failure the loop waits 2, then 5, then 10 minutes, then the
+# normal interval. It does not exit.
+FAILURE_BACKOFF_SECONDS = (2 * 60, 5 * 60, 10 * 60)
+LIVE = "live"
+LOGGED_OUT = "logged_out"
+TRANSIENT = "transient"
+_CF_MARKERS = (
+    "just a moment",
+    "cf-browser-verification",
+    "challenge-platform",
+    "attention required",
+    "cf-mitigated",
+)
 
 _INTERVAL = re.compile(
     r"^\s*(\d+)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)?\s*$",
@@ -135,9 +169,74 @@ def _json_object(body: str) -> dict | None:
 
 def session_response_is_live(status: int, content_type: str, body: str) -> bool:
     """NextAuth returns `null` or `{}` when the session cookie is logged out."""
-    if status != 200 or "json" not in (content_type or "").lower():
-        return False
-    return _json_object(body) is not None
+    return (
+        session_state({"status": status, "content_type": content_type, "body": body})
+        == LIVE
+    )
+
+
+def _cloudflare_challenge(status: int, content_type: str, body: str) -> bool:
+    sample = (body or "")[:4000].lower()
+    if any(marker in sample for marker in _CF_MARKERS):
+        return True
+    return status in (403, 429, 503) and "html" in (content_type or "").lower()
+
+
+def session_state(response: dict) -> str:
+    """`live`, `logged_out`, or `transient`.
+
+    Only HTTP 200 with a JSON `null` or `{}` from `/api/auth/session` is a
+    logged-out NextAuth cookie. A Cloudflare challenge or a 5xx is retried.
+    """
+    status = int(response.get("status") or 0)
+    content_type = response.get("content_type") or ""
+    body = response.get("body") or ""
+    if (
+        status == 0
+        or status >= 500
+        or _cloudflare_challenge(status, content_type, body)
+    ):
+        return TRANSIENT
+    if status != 200 or "json" not in content_type.lower():
+        return TRANSIENT
+    text = body.strip()
+    if text in ("", "null", "{}"):
+        return LOGGED_OUT
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return TRANSIENT
+    if payload is None or payload == {}:
+        return LOGGED_OUT
+    if isinstance(payload, dict) and payload:
+        return LIVE
+    return TRANSIENT
+
+
+def failure_backoff(consecutive: int, interval: int) -> int:
+    """Seconds to wait after `consecutive` failed attempts."""
+    if consecutive <= 0:
+        return interval
+    if consecutive <= len(FAILURE_BACKOFF_SECONDS):
+        return FAILURE_BACKOFF_SECONDS[consecutive - 1]
+    return interval
+
+
+def navigation_urls(*, remint: bool) -> list[str]:
+    if remint:
+        return [DIARY_URL, *ROTATION_URLS]
+    return list(ROTATION_URLS)
+
+
+def merge_cookies(
+    existing: dict[str, str], harvested: dict[str, str]
+) -> dict[str, str]:
+    """Harvested names win. Cookies the browser did not return stay in the file."""
+    merged = dict(existing)
+    for name, value in harvested.items():
+        if name and value is not None:
+            merged[str(name)] = str(value)
+    return merged
 
 
 def auth_token_response_is_live(status: int, content_type: str, body: str) -> bool:
@@ -199,10 +298,15 @@ def _read_response(response) -> dict:
 
 def _rotate_session(
     seed_cookies: dict[str, str] | None,
+    *,
+    remint: bool = False,
 ) -> tuple[dict[str, str], list[dict]]:
-    """Open the persistent profile and request the two rotation URLs.
+    """Open the persistent profile and request the rotation URLs.
 
-    Response bodies are for the liveness check only. Callers must not log them.
+    `remint` opens the diary first so a still-valid legacy cookie can receive
+    a new NextAuth session cookie. Response bodies are for the liveness check
+    only. Callers must not log them. The returned responses are the session
+    poll and the auth-token exchange, in that order.
     """
     from playwright.sync_api import sync_playwright
 
@@ -216,9 +320,10 @@ def _rotate_session(
             if seed_cookies:
                 context.add_cookies(_cookie_payloads(seed_cookies))
             page = context.pages[0] if context.pages else context.new_page()
-            for url in ROTATION_URLS:
+            for url in navigation_urls(remint=remint):
                 response = page.goto(url, wait_until="load", timeout=30000)
-                responses.append(_read_response(response))
+                if url in ROTATION_URLS:
+                    responses.append(_read_response(response))
             harvested = {
                 cookie["name"]: cookie["value"]
                 for cookie in context.cookies(ORIGIN)
@@ -290,6 +395,56 @@ def _sleep(seconds: float) -> bool:
     return _stop
 
 
+def browser_seed() -> dict[str, str] | None:
+    """Full cookies.json jar. `MFP_COOKIE` is a single token and is not enough."""
+    stored = auth.stored_cookies()
+    if stored:
+        return stored
+    return auth.load_cookies()
+
+
+def api_cookies_still_valid(cookies: dict[str, str] | None) -> bool:
+    """The same exchange as `mfp-mcp auth --check`, without printing the result."""
+    if not cookies:
+        return False
+    try:
+        mfp_client.build_client(cookies)
+    except Exception:
+        # The client error can quote the cookie jar. A failed check is
+        # "not valid"; callers explain that without the exception text.
+        return False
+    return True
+
+
+def _failure_message(state: str, *, api_ok: bool, reminted: bool) -> str:
+    if state == TRANSIENT:
+        return (
+            "Keepalive could not confirm the session (Cloudflare or a server "
+            "error). The saved cookies were left unchanged."
+        )
+    if state == LIVE:
+        return (
+            "Keepalive saw a live session but the browser did not return a "
+            "session cookie. The saved cookies were left unchanged."
+        )
+    if api_ok and reminted:
+        return (
+            "NextAuth session is logged out. The saved cookies still pass the "
+            "API check, but visiting the diary did not mint a new session "
+            "cookie. The saved cookies were left unchanged."
+        )
+    if api_ok:
+        return (
+            "NextAuth session is logged out. The saved cookies still pass the "
+            "API check. The saved cookies were left unchanged."
+        )
+    return (
+        "NextAuth session is logged out, and the saved cookies no longer pass "
+        "an API check. Run 'mfp-mcp auth' with a fresh "
+        "__Secure-next-auth.session-token. The saved cookies were left unchanged."
+    )
+
+
 def keepalive_once() -> tuple[bool, str]:
     """Roll the session once. The message is safe to print; it has no cookies."""
     if not playwright_installed():
@@ -305,50 +460,169 @@ def keepalive_once() -> tuple[bool, str]:
             f"{profile_dir()}. Run `MFP_AUTOREFRESH=1 mfp-mcp auth` once "
             "so keepalive has a profile to refresh.",
         )
-    seed = auth.load_cookies()
+    seed = browser_seed()
     try:
         harvested, responses = _rotate_session(seed)
-    except Exception as exc:
-        return False, f"Keepalive could not reach MyFitnessPal ({exc})."
-    if not responses_are_live(responses) or not has_session_cookie(harvested):
-        return (
-            False,
-            "MyFitnessPal session is already dead, so keepalive cannot refresh "
-            "it. The browser profile's copy expires with the cookie. Run "
-            "'mfp-mcp auth' with a fresh __Secure-next-auth.session-token.",
+    except Exception:
+        # Playwright errors can include request URLs and cookie values.
+        return False, _failure_message(TRANSIENT, api_ok=False, reminted=False)
+    state = session_state(responses[0]) if responses else TRANSIENT
+    reminted = False
+    api_ok = False
+    if state == LOGGED_OUT:
+        api_ok = api_cookies_still_valid(seed)
+        if api_ok:
+            reminted = True
+            try:
+                harvested, responses = _rotate_session(seed, remint=True)
+            except Exception:
+                # Same as above: do not interpolate the Playwright error.
+                return False, _failure_message(TRANSIENT, api_ok=True, reminted=True)
+            state = session_state(responses[0]) if responses else TRANSIENT
+    if state == LIVE and has_session_cookie(harvested):
+        auth.save_cookies(merge_cookies(auth.stored_cookies(), harvested))
+        mfp_client.reset()
+        message = (
+            f"Session refreshed and written to {config.cookies_path()} (mode 0600)."
         )
-    auth.save_cookies(harvested)
-    mfp_client.reset()
-    message = f"Session refreshed and written to {config.cookies_path()} (mode 0600)."
-    if config.cookie_env():
-        message += (
-            " MFP_COOKIE is set, so a running server keeps using that value. "
-            "Unset MFP_COOKIE to pick up this file."
-        )
-    return True, message
+        if config.cookie_env():
+            message += (
+                " MFP_COOKIE is set, so a running server keeps using that value. "
+                "Unset MFP_COOKIE to pick up this file."
+            )
+        return True, message
+    return False, _failure_message(state, api_ok=api_ok, reminted=reminted)
+
+
+def keepalive_status_path() -> Path:
+    return config.data_dir() / "keepalive.status"
+
+
+def _read_status() -> dict:
+    path = keepalive_status_path()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_status(
+    *,
+    last_success: str | None,
+    last_error: str | None,
+    consecutive: int,
+    alert: bool,
+) -> None:
+    payload = {
+        "last_success": last_success,
+        "last_error": last_error,
+        "consecutive_failures": consecutive,
+    }
+    if alert:
+        payload["alert"] = True
+    path = keepalive_status_path()
+    text = json.dumps(payload, indent=2) + "\n"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(text)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _configure_line_buffering() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(line_buffering=True)
+        except (OSError, ValueError):
+            continue
+
+
+def _emit(ok: bool, message: str) -> None:
+    print(message, file=sys.stdout if ok else sys.stderr, flush=True)
 
 
 def _report(result: tuple[bool, str]) -> int:
     ok, message = result
-    print(message, file=sys.stdout if ok else sys.stderr)
+    _emit(ok, message)
     return 0 if ok else 1
 
 
-def run_keepalive(*, loop: bool = False, interval: int | None = None) -> int:
-    global _stop
-    _stop = False
-    if not loop:
-        return _report(keepalive_once())
+def run_keepalive(
+    *,
+    loop: bool = False,
+    interval: int | None = None,
+    max_failures: int | None = None,
+) -> int:
+    """Refresh once, or until SIGINT/SIGTERM when `loop` is set.
 
+    A failed refresh does not stop the loop. The wait is 2, 5, then 10
+    minutes, and after that the normal interval.
+    """
+    global _stop
+    _configure_line_buffering()
+    _stop = False
     seconds = DEFAULT_LOOP_SECONDS if interval is None else interval
+    previous = _read_status()
+    last_success = previous.get("last_success")
+    if not isinstance(last_success, str):
+        last_success = None
+    consecutive = previous.get("consecutive_failures")
+    consecutive = consecutive if isinstance(consecutive, int) and consecutive > 0 else 0
+
+    def record(ok: bool, message: str) -> None:
+        nonlocal last_success, consecutive
+        if ok:
+            consecutive = 0
+            last_success = _now()
+            error = None
+        else:
+            consecutive += 1
+            error = message
+        alert = max_failures is not None and consecutive >= max_failures
+        _write_status(
+            last_success=last_success,
+            last_error=error,
+            consecutive=consecutive,
+            alert=alert,
+        )
+        if alert:
+            print(
+                f"keepalive alert: {consecutive} consecutive failures "
+                f"({keepalive_status_path()})",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    if not loop:
+        ok, message = keepalive_once()
+        record(ok, message)
+        _emit(ok, message)
+        return 0 if ok else 1
+
     previous_int = signal.signal(signal.SIGINT, _request_stop)
     previous_term = signal.signal(signal.SIGTERM, _request_stop)
     try:
         while not _stop:
-            code = _report(keepalive_once())
-            if code != 0:
-                return code
-            if _sleep(seconds):
+            ok, message = keepalive_once()
+            _emit(ok, message)
+            record(ok, message)
+            delay = seconds if ok else failure_backoff(consecutive, seconds)
+            if _sleep(delay):
                 return 0
         return 0
     finally:

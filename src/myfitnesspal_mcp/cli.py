@@ -40,12 +40,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--loop",
         action="store_true",
-        help="with keepalive: refresh until the session is dead or the process is stopped",
+        help=(
+            "with keepalive: keep refreshing until the process is stopped. "
+            "A failed refresh is logged and retried"
+        ),
     )
     parser.add_argument(
         "--interval",
         default=None,
         help="with keepalive --loop: delay between refreshes (default 20m; 20m, 1h, 90s)",
+    )
+    parser.add_argument(
+        "--max-failures",
+        type=int,
+        default=None,
+        help=(
+            "with keepalive --loop: print an alert after this many consecutive "
+            "failures. The loop keeps running"
+        ),
     )
     return parser
 
@@ -56,10 +68,20 @@ def main() -> None:
 
     if args.check and args.command != "auth":
         parser.error("--check only applies to the auth command")
-    if args.command != "keepalive" and (args.loop or args.interval):
-        parser.error("--loop and --interval apply to the keepalive command")
+    if args.command != "keepalive" and (
+        args.loop or args.interval or args.max_failures is not None
+    ):
+        parser.error("--loop, --interval, and --max-failures apply to keepalive")
     if args.command == "keepalive" and args.interval and not args.loop:
         parser.error("--interval applies to keepalive --loop")
+    if args.command == "keepalive" and args.max_failures is not None and not args.loop:
+        parser.error("--max-failures applies to keepalive --loop")
+    if (
+        args.command == "keepalive"
+        and args.max_failures is not None
+        and args.max_failures < 1
+    ):
+        parser.error("--max-failures must be at least 1")
     if args.command == "keepalive" and args.http:
         parser.error("--http does not apply to keepalive")
 
@@ -72,7 +94,13 @@ def main() -> None:
             seconds = parse_interval(args.interval) if args.interval else None
         except ValueError as exc:
             parser.error(str(exc))
-        raise SystemExit(run_keepalive(loop=args.loop, interval=seconds))
+        raise SystemExit(
+            run_keepalive(
+                loop=args.loop,
+                interval=seconds,
+                max_failures=args.max_failures,
+            )
+        )
 
     if args.command == "auth" and args.check:
         from .auth import run_check
