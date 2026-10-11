@@ -113,35 +113,59 @@ That poll is what rolls `__Secure-next-auth.session-token`. The NextAuth
 JWT helper shipped in the page defaults `maxAge` to 30 days. The public
 assets do not publish the server's `session.maxAge` or `updateAge`.
 
-This server exchanges that cookie once, when it builds a client, at
+This server exchanges cookies when it builds a client, at
 `GET /user/auth_token?refresh=true`. The response carries `access_token`,
-`refresh_token`, `expires_in`, and `user_id`. On a real account the saved
-cookie stops being accepted about 1–2 hours after it is captured. The
-exchange then returns the logged-out HTML page, which shows up as
-"Could not access MyFitnessPal using the cookies provided by your browser".
-Opening the saved browser profile after that does not log in again: the
-profile holds the same cookie.
+`refresh_token`, `expires_in`, and `user_id`. That `refresh_token` is an
+API token for api.myfitnesspal.com. It is not a NextAuth session, and the
+public site has no route that turns it into
+`Set-Cookie: __Secure-next-auth.session-token` (minting that cookie needs
+the server secret). The page bundle's `/api/auth/refresh-token-data` route
+is a test double. python-myfitnesspal reads the JSON and does not store
+the refresh token.
 
-`__Host-next-auth.csrf-token` and `__Secure-next-auth.callback-url` are
-sign-in bookkeeping. The session poll and the token exchange authenticate
-with `__Secure-next-auth.session-token`. The website deletes the legacy
-`known_user` cookie on logout; the exchange does not read it.
+`GET /api/auth/session` looks only at the NextAuth cookie. HTTP 200 with
+`null` or `{}` means that cookie is logged out. On a live account the full
+`cookies.json` jar still passed `/user/auth_token?refresh=true` after the
+bare NextAuth token failed `mfp-mcp auth`. The extra credential is some
+other cookie in the jar. The legacy Rails cookie `p` is the long-lived
+session the old site used. `known_user` is a "this browser has logged in"
+flag the web app deletes on logout, not a credential. `_mfp_session`, when
+the server sets it, is not named in the public page scripts.
+
+The NextAuth cookie itself stops being accepted about 1–2 hours after it
+is captured if nothing polls `/api/auth/session`. A homepage visit does
+not roll it: the website waits 120 seconds before its next poll.
 
 Keep the cookie alive by scheduling keepalive with the same install that
 has the `[autorefresh]` extra (the one that seeded
-`~/.local/share/myfitnesspal-mcp/browser-profile`). Leave `MFP_COOKIE`
-unset so the running server reads the file. The server re-reads
-`cookies.json` when its modification time changes, so this process can
-stay up across refreshes:
+`~/.local/share/myfitnesspal-mcp/browser-profile`). Each run seeds the
+browser with the full `cookies.json` jar, not only the NextAuth token, and
+merges the harvest back so cookies the browser omits stay in the file.
+Leave `MFP_COOKIE` unset so the running server reads the file. The server
+re-reads `cookies.json` when its modification time changes:
 
 ```bash
 mfp-mcp keepalive --loop --interval 20m
 ```
 
+The loop stays up. A failed refresh is logged and retried after 2 minutes,
+then 5, then 10, and after that on the normal interval. It exits when the
+process is stopped (SIGINT or SIGTERM). A Cloudflare challenge or an HTTP
+5xx is a retry. Only `/api/auth/session` returning HTTP 200 `null` or `{}`
+counts as logged out. If the full jar still passes the API check, that
+attempt also opens the diary so the site can bridge the jar into a new
+NextAuth cookie. Whether MyFitnessPal actually does that from `p` (or
+`_mfp_session`) was not confirmed against a live account.
+
+Each attempt writes
+`~/.local/share/myfitnesspal-mcp/keepalive.status` (mode `0600`) with
+`last_success`, `last_error`, and `consecutive_failures`. A watchdog can
+read that file. `--max-failures N` also prints an alert after N consecutive
+failures and does not stop the loop.
+
 A one-shot `mfp-mcp keepalive` does the same refresh and exits. It exits
-non-zero when the session is already dead. Twenty minutes stays inside
-the observed 1–2 hour window. A homepage visit does not roll the cookie:
-the website waits 120 seconds before its next poll.
+non-zero when the refresh fails, and it still writes the status file.
+Twenty minutes stays inside the observed 1–2 hour window.
 
 Paste only `__Secure-next-auth.session-token`. Do not put `MFP_COOKIE` in an
 MCP client JSON file. The server is read-only until you set
@@ -315,10 +339,12 @@ internet. Write tools stay off unless `MFP_ALLOW_WRITES=1`.
 - **403 / Cloudflare blocked**: try `MFP_IMPERSONATE=chrome124` (or another
   [curl_cffi target](https://github.com/lexiforest/curl_cffi#supported-browsers)).
   Datacenter IPs get challenged far more than residential ones.
-- **"Session expired"** or **"already dead"**: the saved cookie aged out
-  (about 1–2 hours without keepalive). Run `mfp-mcp auth` with a fresh
-  cookie, then keep `mfp-mcp keepalive --loop --interval 20m` running.
-  `mfp-mcp auth --check` reports the saved session without changing it.
+- **"Session expired"** or **keepalive "logged out"**: the NextAuth cookie
+  aged out (about 1–2 hours without a successful keepalive). The loop keeps
+  running and writes `keepalive.status`. If `mfp-mcp auth --check` still
+  says the full jar is valid, leave the loop running; it will try the diary
+  with that jar. If the check fails too, run `mfp-mcp auth` with a fresh
+  cookie. `mfp-mcp auth --check` reports the saved session without changing it.
 - **"Write tools are disabled"**: expected unless `MFP_ALLOW_WRITES=1`.
 - **"is not enabled"**: `MFP_WRITE_TOOLS` does not name that tool. `food` is log, edit, and delete only.
 - **"couldn't read your MyFitnessPal profile"**: MFP's profile endpoint 500s
