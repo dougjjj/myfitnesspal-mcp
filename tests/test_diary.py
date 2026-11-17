@@ -241,6 +241,8 @@ def test_delete_food_default_keyword_filters_renamed_meal(
     assert result == {
         "removed": "Banana - Fresh, 1 medium",
         "meal": "fruits/veggies/nuts/seeds",
+        "entry_id": "c1",
+        "index": 1,
     }
     _, url, _ = client.session.calls[-1]
     assert url.endswith("food/remove/c1")
@@ -379,10 +381,10 @@ def test_diary_entries_map_meals(client):
     doc, token = diary.diary_page(client, TODAY)
     assert token == "DIARYTOKEN"
     entries = diary.diary_entries(doc)
-    assert [(e["meal"], e["entry_id"]) for e in entries] == [
-        ("breakfast", "e1"),
-        ("breakfast", "e2"),
-        ("lunch", "e3"),
+    assert [(e["meal"], e["entry_id"], e["index"]) for e in entries] == [
+        ("breakfast", "e1", 1),
+        ("breakfast", "e2", 2),
+        ("lunch", "e3", 1),
     ]
 
 
@@ -444,7 +446,12 @@ def test_resolve_entry_no_match_lists_what_is_actually_logged():
 
 def test_delete_food_removes_match(client):
     result = diary.delete_food(client, TODAY, "coffee")
-    assert result == {"removed": "Coffee, 1 cup", "meal": "breakfast"}
+    assert result == {
+        "removed": "Coffee, 1 cup",
+        "meal": "breakfast",
+        "entry_id": "e2",
+        "index": 2,
+    }
     method, url, kwargs = client.session.calls[-1]
     assert "food/remove/e2" in url
     assert kwargs["data"]["_method"] == "delete"
@@ -454,6 +461,195 @@ def test_delete_food_removes_match(client):
 def test_delete_food_no_match(client):
     with pytest.raises(diary.NoMatchingEntry, match="in dinner"):
         diary.delete_food(client, TODAY, "coffee", meal="dinner")
+
+
+DUPLICATE_BREAKFAST = """
+<html>
+<head><meta name="csrf-token" content="DUPTOKEN"></head>
+<body>
+<table>
+  <tr class="meal_header"><td>Breakfast</td></tr>
+  <tr><td><a data-food-entry-id="r1">Abbott's Light Rye</a></td></tr>
+  <tr><td><a data-food-entry-id="e9">Eggs</a></td></tr>
+  <tr><td><a data-food-entry-id="r2">Abbott's Light Rye</a></td></tr>
+  <tr class="meal_header"><td>Lunch</td></tr>
+  <tr><td><a data-food-entry-id="r3">Abbott's Light Rye</a></td></tr>
+</table>
+</body>
+</html>
+"""
+
+
+def _remove_urls(client):
+    return [
+        url
+        for method, url, _payload in client.session.calls
+        if method == "POST" and "food/remove" in url
+    ]
+
+
+@pytest.fixture
+def duplicate_meals(client, make_response):
+    client.session.route(
+        "GET", "food/diary?date=", make_response(text=DUPLICATE_BREAKFAST)
+    )
+    return client
+
+
+def test_delete_food_identical_names_refuse_and_list_ids(duplicate_meals):
+    with pytest.raises(diary.AmbiguousEntry, match="Nothing was deleted") as exc_info:
+        diary.delete_food(
+            duplicate_meals, TODAY, "Abbott's Light Rye", meal="breakfast"
+        )
+    message = str(exc_info.value)
+    assert "entry_id=r1" in message
+    assert "index=1" in message
+    assert "entry_id=r2" in message
+    assert "index=3" in message
+    assert "entry_id=r3" not in message
+    assert not mfp_client.is_auth_error(exc_info.value)
+    assert _remove_urls(duplicate_meals) == []
+
+
+def test_delete_food_unscoped_duplicates_name_the_meal(duplicate_meals):
+    with pytest.raises(diary.AmbiguousEntry, match="Nothing was deleted") as exc_info:
+        diary.delete_food(duplicate_meals, TODAY, "Abbott's Light Rye")
+    message = str(exc_info.value)
+    assert "meal=breakfast" in message
+    assert "meal=lunch" in message
+    assert "entry_id=r3" in message
+    assert _remove_urls(duplicate_meals) == []
+
+
+def test_delete_food_by_entry_id_removes_one_duplicate(duplicate_meals):
+    result = diary.delete_food(duplicate_meals, TODAY, meal="breakfast", entry_id="r2")
+    assert result == {
+        "removed": "Abbott's Light Rye",
+        "meal": "breakfast",
+        "entry_id": "r2",
+        "index": 3,
+    }
+    assert _remove_urls(duplicate_meals) == [
+        "https://www.myfitnesspal.com/food/remove/r2"
+    ]
+
+
+def test_delete_food_by_index_removes_one_duplicate(duplicate_meals):
+    result = diary.delete_food(duplicate_meals, TODAY, meal="breakfast", index=1)
+    assert result["entry_id"] == "r1"
+    assert result["removed"] == "Abbott's Light Rye"
+    assert _remove_urls(duplicate_meals) == [
+        "https://www.myfitnesspal.com/food/remove/r1"
+    ]
+
+
+def test_delete_food_index_must_match_query(duplicate_meals):
+    with pytest.raises(diary.DiaryLookupError, match="Nothing was deleted") as exc_info:
+        diary.delete_food(
+            duplicate_meals,
+            TODAY,
+            "Abbott's Light Rye",
+            meal="breakfast",
+            index=2,
+        )
+    assert "Eggs" in str(exc_info.value)
+    assert "entry_id=r2" in str(exc_info.value)
+    assert _remove_urls(duplicate_meals) == []
+
+
+def test_delete_food_entry_id_in_other_meal_removes_nothing(duplicate_meals):
+    with pytest.raises(diary.DiaryLookupError, match="not 'breakfast'"):
+        diary.delete_food(duplicate_meals, TODAY, meal="breakfast", entry_id="r3")
+    assert _remove_urls(duplicate_meals) == []
+
+
+def test_delete_food_unknown_entry_id_lists_candidates(duplicate_meals):
+    with pytest.raises(diary.NoMatchingEntry, match="entry_id=missing") as exc_info:
+        diary.delete_food(duplicate_meals, TODAY, entry_id="missing")
+    assert "entry_id=r1" in str(exc_info.value)
+    assert _remove_urls(duplicate_meals) == []
+
+
+def test_delete_food_index_out_of_range_lists_the_meal(duplicate_meals):
+    with pytest.raises(diary.NoMatchingEntry, match="index 9") as exc_info:
+        diary.delete_food(duplicate_meals, TODAY, meal="breakfast", index=9)
+    assert "entry_id=e9" in str(exc_info.value)
+    assert _remove_urls(duplicate_meals) == []
+
+
+def test_delete_food_index_requires_a_meal(duplicate_meals):
+    with pytest.raises(ValueError, match="pass meal"):
+        diary.delete_food(duplicate_meals, TODAY, index=1)
+    assert _remove_urls(duplicate_meals) == []
+
+
+def test_delete_food_entry_id_and_index_must_agree(duplicate_meals):
+    with pytest.raises(diary.DiaryLookupError, match="not index 1"):
+        diary.delete_food(
+            duplicate_meals, TODAY, meal="breakfast", entry_id="r2", index=1
+        )
+    assert _remove_urls(duplicate_meals) == []
+
+
+def test_merge_pairs_duplicate_rows_by_position_when_counts_match():
+    cached = [
+        {"meal": "Breakfast", "name": "Abbott's Light Rye, 1 slice", "calories": 80},
+        {"meal": "Breakfast", "name": "Abbott's Light Rye, 1 slice", "calories": 81},
+    ]
+    parsed = [
+        {
+            "meal": "breakfast",
+            "name": "Abbott's Light Rye",
+            "entry_id": "r1",
+            "index": 1,
+        },
+        {
+            "meal": "breakfast",
+            "name": "Abbott's Light Rye",
+            "entry_id": "r2",
+            "index": 2,
+        },
+    ]
+    merged = diary.merge_entry_identities(cached, parsed)
+    assert [(row["entry_id"], row["index"], row["calories"]) for row in merged] == [
+        ("r1", 1, 80),
+        ("r2", 2, 81),
+    ]
+
+
+def test_merge_keeps_a_duplicate_the_cache_missed():
+    cached = [{"meal": "Breakfast", "name": "Whey", "calories": 120}]
+    parsed = [
+        {
+            "meal": "breakfast",
+            "meal_label": "Breakfast",
+            "name": "Whey",
+            "entry_id": "a1",
+            "index": 1,
+        },
+        {
+            "meal": "breakfast",
+            "meal_label": "Breakfast",
+            "name": "Oats",
+            "entry_id": "a2",
+            "index": 2,
+        },
+        {
+            "meal": "breakfast",
+            "meal_label": "Breakfast",
+            "name": "Whey",
+            "entry_id": "b1",
+            "index": 3,
+        },
+    ]
+    merged = diary.merge_entry_identities(cached, parsed)
+    assert [
+        (row["name"], row["entry_id"], row["index"], row["calories"]) for row in merged
+    ] == [
+        ("Whey", "a1", 1, 120),
+        ("Oats", "a2", 2, None),
+        ("Whey", "b1", 3, None),
+    ]
 
 
 def test_get_note_double_unescapes_body(client, make_response):

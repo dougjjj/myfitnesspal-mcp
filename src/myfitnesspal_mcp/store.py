@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS diary_entry (
     calories REAL,
     protein REAL,
     carbs REAL,
-    fat REAL
+    fat REAL,
+    entry_id TEXT,
+    meal_index INTEGER
 );
 CREATE INDEX IF NOT EXISTS diary_entry_day ON diary_entry(day);
 CREATE TABLE IF NOT EXISTS feel_note (
@@ -146,6 +148,18 @@ class Store:
                 "OR goal_calories IS NOT NULL"
             )
             self.conn.commit()
+        entry_columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(diary_entry)")
+        }
+        added_entry_column = False
+        if "entry_id" not in entry_columns:
+            self.conn.execute("ALTER TABLE diary_entry ADD COLUMN entry_id TEXT")
+            added_entry_column = True
+        if "meal_index" not in entry_columns:
+            self.conn.execute("ALTER TABLE diary_entry ADD COLUMN meal_index INTEGER")
+            added_entry_column = True
+        if added_entry_column:
+            self.conn.commit()
 
     @_serialized
     def upsert_nutrition(self, day: str, **fields) -> None:
@@ -190,8 +204,8 @@ class Store:
     def replace_diary(self, day: str, entries: list[dict]) -> None:
         self.conn.execute("DELETE FROM diary_entry WHERE day = ?", (day,))
         self.conn.executemany(
-            "INSERT INTO diary_entry (day, meal, name, calories, protein, carbs, fat) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO diary_entry (day, meal, name, calories, protein, carbs, fat, "
+            "entry_id, meal_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     day,
@@ -201,6 +215,8 @@ class Store:
                     e.get("protein"),
                     e.get("carbs"),
                     e.get("fat"),
+                    e.get("entry_id"),
+                    e.get("index"),
                 )
                 for e in entries
             ],
@@ -210,8 +226,8 @@ class Store:
     @_serialized
     def diary(self, day: str) -> list[dict]:
         rows = self.conn.execute(
-            "SELECT meal, name, calories, protein, carbs, fat FROM diary_entry "
-            "WHERE day = ? ORDER BY id",
+            "SELECT meal, name, calories, protein, carbs, fat, entry_id, "
+            'meal_index AS "index" FROM diary_entry WHERE day = ? ORDER BY id',
             (day,),
         ).fetchall()
         return [dict(r) for r in rows]

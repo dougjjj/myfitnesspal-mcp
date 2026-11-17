@@ -144,6 +144,59 @@ def test_migrates_pre_diary_synced_database(tmp_path):
     assert store.nutrition("2026-07-03")["weight"] == 80.0
 
 
+def test_migrates_diary_entry_identity_columns(tmp_path):
+    from myfitnesspal_mcp.store import Store
+
+    path = tmp_path / "old-diary.db"
+    legacy = sqlite3.connect(str(path))
+    legacy.executescript(
+        """
+        CREATE TABLE diary_entry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            day TEXT NOT NULL,
+            meal TEXT,
+            name TEXT,
+            calories REAL,
+            protein REAL,
+            carbs REAL,
+            fat REAL
+        );
+        INSERT INTO diary_entry (day, meal, name, calories)
+        VALUES ('2026-07-01', 'Breakfast', 'Oats', 300);
+        """
+    )
+    legacy.commit()
+    legacy.close()
+
+    store = Store(path)
+    assert store.diary("2026-07-01") == [
+        {
+            "meal": "Breakfast",
+            "name": "Oats",
+            "calories": 300.0,
+            "protein": None,
+            "carbs": None,
+            "fat": None,
+            "entry_id": None,
+            "index": None,
+        }
+    ]
+    store.replace_diary(
+        "2026-07-01",
+        [
+            {
+                "meal": "Breakfast",
+                "name": "Oats",
+                "calories": 300,
+                "entry_id": "r1",
+                "index": 1,
+            }
+        ],
+    )
+    assert store.diary("2026-07-01")[0]["entry_id"] == "r1"
+    assert store.diary("2026-07-01")[0]["index"] == 1
+
+
 def test_export_range_unions_sources(store):
     store.upsert_nutrition("2026-07-01", calories=2000.0)
     store.replace_diary("2026-07-02", [{"meal": "Lunch", "name": "Soup"}])

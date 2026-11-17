@@ -534,3 +534,77 @@ def test_server_returns_warnings_instead_of_failing(connected):
     listed = asyncio.run(server.fitness_list_recent_foods())
     assert listed["items"] == []
     assert "POST /food/load_recent" in listed["warnings"][0]
+
+
+_LEGACY_MY_FOODS_TAB = """
+<div class="my_foods_page"><table><tbody>
+  <tr class="favorite">
+    <td><input class="checkbox" type="checkbox" data-food-id="258942193"
+      data-food-external-id="11c5" data-list-type="my_foods" /></td>
+    <td>Maximum Nutrition - Pea Protein - Chocolate</td>
+    <td><select class="select">
+      <option value="349297665">1 Scoop (40g)</option>
+      <option value="349297666">1 container</option>
+    </select></td>
+  </tr>
+</tbody></table></div>
+"""
+
+_LEGACY_MEALS_TAB = """
+<div class="meals_page"><table><tbody>
+  <tr class="favorite">
+    <td><input class="checkbox" type="checkbox" data-food-id="257651586"
+      data-list-type="meals" /></td>
+    <td>Lunch - Mexican Rice</td>
+    <td><select class="select"><option value="347769583">1 meal</option></select></td>
+  </tr>
+</tbody></table></div>
+"""
+
+
+@pytest.fixture
+def logged_out_bff(client, make_response):
+    # NextAuth logged out: the /api/services proxy has no bearer to forward.
+    missing = make_response(
+        status_code=400,
+        json_data={
+            "error": "validation/3",
+            "error_description": "Missing HTTP header: Authorization",
+        },
+    )
+    client.session.route("GET", "users/foods/mine", missing)
+    client.session.route("GET", "users/meals/mine", missing)
+    client.session.route(
+        "POST", "food/load_my_foods", make_response(text=_LEGACY_MY_FOODS_TAB)
+    )
+    client.session.route(
+        "POST", "food/load_meals", make_response(text=_LEGACY_MEALS_TAB)
+    )
+    return client
+
+
+def test_my_foods_fall_back_to_legacy_tab_when_bff_rejects(logged_out_bff):
+    items = personal.list_my_foods(logged_out_bff)
+    assert [item["name"] for item in items] == [
+        "Maximum Nutrition - Pea Protein - Chocolate"
+    ]
+    assert items[0]["food_id"] == "258942193"
+    assert items[0]["weight_id"] == "349297665"
+    assert items[0]["version"] is None
+    assert [s["label"] for s in items[0]["servings"]] == [
+        "1 Scoop (40g)",
+        "1 container",
+    ]
+
+
+def test_my_meals_fall_back_to_legacy_tab_when_bff_rejects(logged_out_bff):
+    meals = personal.list_my_meals(logged_out_bff)
+    assert [meal["name"] for meal in meals] == ["Lunch - Mexican Rice"]
+    assert meals[0]["meal_id"] == "257651586"
+    assert meals[0]["foods"] == []
+
+
+def test_find_food_still_returns_results_when_bff_rejects(logged_out_bff):
+    results, _warnings = personal.find_food(logged_out_bff, "pea protein", 5, False)
+    assert results[0]["source"] == "my_food"
+    assert results[0]["food_id"] == "258942193"

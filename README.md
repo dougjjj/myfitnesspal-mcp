@@ -207,7 +207,7 @@ Then set `MFP_AUTOREFRESH=1` in the client config as well
 
 | Tool | What it does |
 | --- | --- |
-| `fitness_get_day` | Nutrition totals, diary entries, the MFP daily note, and feel note for a day |
+| `fitness_get_day` | Nutrition totals, diary entries (with `entry_id` and meal `index`), the MFP daily note, and feel note for a day |
 | `fitness_search_food` | Your foods, meals, recipes, recents, and frequents first, then the public database. Each hit has `source` and the ids to log it |
 | `fitness_find_food` | Same search as `fitness_search_food` |
 | `fitness_list_my_foods` | Foods you created, with calories, macros, servings, and ids |
@@ -219,7 +219,7 @@ Then set `MFP_AUTOREFRESH=1` in the client config as well
 | `fitness_log_food` | Log a draft option, a My Food, a recipe, a saved meal, a remembered food, or exact ids |
 | `fitness_list_food_pins` | Remembered query → food/serving choices (local) |
 | `fitness_clear_food_pin` | Forget one remembered choice, or all of them |
-| `fitness_delete_food` | Remove a diary entry by name match |
+| `fitness_delete_food` | Remove one diary entry by name, or by `entry_id` / meal `index` when two entries share a name |
 | `fitness_modify_food` | Replace an entry (or change its quantity), choosing the replacement like `fitness_log_food` |
 | `fitness_log_weight` | Log a weight measurement (updates the same day on re-log) |
 | `fitness_log_water` | Add water (cups, fl oz, mL, L) or set the day's total with `replace` |
@@ -284,6 +284,16 @@ still work: `breakfast`/`lunch`/`dinner`/`snacks` fall back to your first
 through fourth meal, unless that slot now carries a different default name
 (e.g. `lunch` won't land in a second meal you renamed to "Dinner"). Any other unrecognized `meal` raises an error instead
 of silently logging into the wrong section.
+
+`fitness_get_day` gives every logged food an `entry_id` (MyFitnessPal's id for
+that diary row) and an `index` (1-based position within its meal).
+`fitness_delete_food(query=...)` removes a single matching name. When two
+entries share a name — the same food logged twice — that call removes nothing
+and the error lists each meal, `entry_id`, and `index`. Remove one of them with
+`fitness_delete_food(entry_id=...)` or
+`fitness_delete_food(meal="breakfast", index=3)`. `index` is that meal
+position, not "the second match": the row at `index` has to be the one you
+mean, and passing `query` as well refuses if that row's name does not match.
 
 Day summaries and trends read from a local SQLite cache that gap-fills from
 MyFitnessPal (first call on a fresh install fetches up to 30 days, one request
