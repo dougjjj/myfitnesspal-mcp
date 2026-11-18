@@ -329,22 +329,130 @@ def diary_page(client, day: date):
 def diary_entries(doc) -> list[dict]:
     entries = []
     current_meal = None
+    current_label = None
     meal_position = -1
+    position_in_meal = 0
     for row in doc.xpath("//tr"):
         if _is_meal_header(row):
             meal_position += 1
-            current_meal = _normalize_meal(_header_label(row, meal_position))
+            current_label = _header_label(row, meal_position)
+            current_meal = _normalize_meal(current_label)
+            position_in_meal = 0
             continue
         anchors = row.xpath(".//a[@data-food-entry-id]")
         if anchors:
+            position_in_meal += 1
             entries.append(
                 {
                     "entry_id": anchors[0].get("data-food-entry-id"),
                     "meal": current_meal,
+                    "meal_label": current_label,
                     "name": anchors[0].text_content().strip(),
+                    "index": position_in_meal,
                 }
             )
     return entries
+
+
+def _format_entry(entry: dict) -> str:
+    details = []
+    if entry.get("meal"):
+        details.append(f"meal={entry['meal']}")
+    entry_id = entry.get("entry_id")
+    if entry_id:
+        details.append(f"entry_id={entry_id}")
+    if entry.get("index") is not None:
+        details.append(f"index={entry['index']}")
+    label = f"{entry['name']!r}"
+    if not details:
+        return label
+    return f"{label} ({', '.join(details)})"
+
+
+def _entry_name_key(name: str | None) -> str:
+    return _collapse_whitespace(name or "").lower()
+
+
+def _with_identity(row: dict, parsed_row: dict | None) -> dict:
+    if parsed_row is None:
+        return {**row, "entry_id": None, "index": None}
+    return {
+        **row,
+        "entry_id": parsed_row.get("entry_id"),
+        "index": parsed_row.get("index"),
+    }
+
+
+def _identity_only(parsed_row: dict) -> dict:
+    return {
+        "meal": parsed_row.get("meal_label") or parsed_row.get("meal"),
+        "name": parsed_row.get("name"),
+        "calories": None,
+        "protein": None,
+        "carbs": None,
+        "fat": None,
+        "entry_id": parsed_row.get("entry_id"),
+        "index": parsed_row.get("index"),
+    }
+
+
+def _take_named_match(
+    parsed_rows: list[dict], used: list[bool], name: str | None
+) -> dict | None:
+    wanted = _entry_name_key(name)
+    for position, candidate in enumerate(parsed_rows):
+        if used[position]:
+            continue
+        if _entry_name_key(candidate.get("name")) == wanted:
+            used[position] = True
+            return candidate
+    return None
+
+
+def merge_entry_identities(cached: list[dict], parsed: list[dict]) -> list[dict]:
+    """Attach diary-page entry ids onto cached rows.
+
+    When a meal has the same number of rows in both lists, zip by position.
+    The library's anchor text and this page's text can disagree, and both
+    walks follow that meal's rows in order. A diary row the cache missed is
+    kept so a duplicate name stays visible.
+    """
+    parsed_by_meal: dict[str | None, list[dict]] = {}
+    for entry in parsed:
+        parsed_by_meal.setdefault(entry.get("meal"), []).append(entry)
+
+    cached_by_meal: dict[str | None, list[dict]] = {}
+    meal_order: list[str | None] = []
+    for row in cached:
+        meal = _normalize_meal(row.get("meal"))
+        if meal not in cached_by_meal:
+            meal_order.append(meal)
+        cached_by_meal.setdefault(meal, []).append(row)
+    for meal in parsed_by_meal:
+        if meal not in cached_by_meal:
+            meal_order.append(meal)
+
+    merged: list[dict] = []
+    for meal in meal_order:
+        cached_rows = cached_by_meal.get(meal, [])
+        parsed_rows = parsed_by_meal.get(meal, [])
+        if cached_rows and len(cached_rows) == len(parsed_rows):
+            merged.extend(
+                _with_identity(row, parsed_row)
+                for row, parsed_row in zip(cached_rows, parsed_rows, strict=True)
+            )
+            continue
+        used = [False] * len(parsed_rows)
+        for row in cached_rows:
+            merged.append(
+                _with_identity(
+                    row, _take_named_match(parsed_rows, used, row.get("name"))
+                )
+            )
+        for parsed_row, taken in zip(parsed_rows, used, strict=True):
+            if not taken:
+                merged.append(_identity_only(parsed_row))
+    return merged
 
 
 def _meal_pool(entries: list[dict], meal: str | None) -> list[dict]:
@@ -390,7 +498,7 @@ class AmbiguousEntry(DiaryLookupError):
     ):
         self.candidates = candidates
         where = f" in {meal}" if meal else ""
-        options = "; ".join(f"{c['name']!r}" for c in candidates)
+        options = "; ".join(_format_entry(candidate) for candidate in candidates)
         super().__init__(
             f"'{query}'{where} on {day.isoformat()} matches multiple diary entries: "
             f"{options}. {advice}"
@@ -414,21 +522,157 @@ def no_matching_entry(
 ) -> NoMatchingEntry:
     where = f" in {meal}" if meal else ""
     pool = _meal_pool(entries, meal)
-    logged = "; ".join(f"{e['name']!r}" for e in pool) if pool else "(nothing logged)"
+    logged = (
+        "; ".join(_format_entry(entry) for entry in pool)
+        if pool
+        else "(nothing logged)"
+    )
     return NoMatchingEntry(
         f"no diary entry matching '{query}'{where} on {day.isoformat()}. "
         f"Entries actually logged{where}: {logged}"
     )
 
 
-def delete_food(
-    client, day: date, query: str, meal: str | None = None, page: tuple | None = None
+_DELETE_ONE_ADVICE = (
+    "Nothing was deleted. Narrow the query to one entry, or pass entry_id "
+    "to remove one row, or pass meal and index (the 1-based position of that "
+    "row within the meal)."
+)
+
+
+def _clean_entry_id(entry_id: str | int | None) -> str | None:
+    if entry_id is None or isinstance(entry_id, bool):
+        return None
+    text = str(entry_id).strip()
+    return text or None
+
+
+def _clean_index(index: int | None) -> int | None:
+    if index is None:
+        return None
+    if isinstance(index, bool) or not isinstance(index, int) or index < 1:
+        raise ValueError(
+            "index must be an integer >= 1 (the first entry in the meal is 1)"
+        )
+    return index
+
+
+def _query_matches(entry: dict, query: str | None) -> bool:
+    if not query:
+        return True
+    return query.lower() in entry["name"].lower()
+
+
+def _select_food_entry(
+    entries: list[dict],
+    day: date,
+    query: str | None,
+    meal: str | None,
+    entry_id: str | None,
+    index: int | None,
 ) -> dict:
+    if entry_id is not None:
+        found = [entry for entry in entries if str(entry.get("entry_id")) == entry_id]
+        if not found:
+            logged = (
+                "; ".join(_format_entry(entry) for entry in entries)
+                if entries
+                else "(nothing logged)"
+            )
+            raise NoMatchingEntry(
+                f"no diary entry with entry_id={entry_id} on {day.isoformat()}. "
+                f"Entries actually logged: {logged}"
+            )
+        if len(found) > 1:
+            raise AmbiguousEntry(entry_id, meal, day, found, advice=_DELETE_ONE_ADVICE)
+        entry = found[0]
+        if meal is not None and entry["meal"] != meal:
+            raise DiaryLookupError(
+                f"entry_id={entry_id} is in {entry['meal']!r}, not {meal!r}. "
+                "Nothing was deleted."
+            )
+        if index is not None and entry.get("index") != index:
+            raise DiaryLookupError(
+                f"entry_id={entry_id} is index {entry.get('index')} in "
+                f"{entry['meal']!r}, not index {index}. Nothing was deleted."
+            )
+        if not _query_matches(entry, query):
+            raise DiaryLookupError(
+                f"{_format_entry(entry)} on {day.isoformat()} does not match "
+                f"{query!r}. Nothing was deleted."
+            )
+        return entry
+
+    if index is not None:
+        if meal is None:
+            raise ValueError(
+                "index is a position within one meal; pass meal as well "
+                "(breakfast, lunch, dinner, snacks, or a meal name on the diary)"
+            )
+        pool = _meal_pool(entries, meal)
+        found = [entry for entry in pool if entry.get("index") == index]
+        if not found:
+            logged = (
+                "; ".join(_format_entry(entry) for entry in pool)
+                if pool
+                else "(nothing logged)"
+            )
+            raise NoMatchingEntry(
+                f"no diary entry at index {index} in {meal} on {day.isoformat()}. "
+                f"Entries in that meal: {logged}"
+            )
+        if len(found) > 1:
+            raise AmbiguousEntry(
+                query or str(index), meal, day, found, advice=_DELETE_ONE_ADVICE
+            )
+        entry = found[0]
+        if query and not _query_matches(entry, query):
+            logged = "; ".join(_format_entry(item) for item in pool)
+            raise DiaryLookupError(
+                f"index {index} in {meal} on {day.isoformat()} is "
+                f"{_format_entry(entry)}, which does not match {query!r}. "
+                f"Nothing was deleted. Entries in that meal: {logged}"
+            )
+        return entry
+
+    try:
+        return resolve_entry(entries, query or "", meal, day)
+    except AmbiguousEntry as ambiguous:
+        raise AmbiguousEntry(
+            query or "",
+            meal,
+            day,
+            ambiguous.candidates,
+            advice=_DELETE_ONE_ADVICE,
+        ) from None
+
+
+def delete_food(
+    client,
+    day: date,
+    query: str | None = None,
+    meal: str | None = None,
+    page: tuple | None = None,
+    *,
+    entry_id: str | int | None = None,
+    index: int | None = None,
+) -> dict:
+    entry_id = _clean_entry_id(entry_id)
+    index = _clean_index(index)
+    if query is not None and not str(query).strip():
+        query = None
+    if query is None and entry_id is None and index is None:
+        raise ValueError("pass query, entry_id, or index")
     doc, token = page or diary_page(client, day)
     label = _normalize_meal(resolve_meal(doc, meal)[1]) if meal else None
-    entry = resolve_entry(diary_entries(doc), query, label, day)
+    entry = _select_food_entry(diary_entries(doc), day, query, label, entry_id, index)
     remove_entry(client, entry["entry_id"], token)
-    return {"removed": entry["name"], "meal": entry["meal"]}
+    return {
+        "removed": entry["name"],
+        "meal": entry["meal"],
+        "entry_id": entry["entry_id"],
+        "index": entry.get("index"),
+    }
 
 
 def set_weight(client, day: date, value: float) -> dict:

@@ -3,7 +3,7 @@ import asyncio
 import pytest
 from myfitnesspal.exceptions import MyfitnesspalLoginError
 
-from myfitnesspal_mcp import mfp_client, server
+from myfitnesspal_mcp import diary, mfp_client, server
 from myfitnesspal_mcp.store import Store
 
 
@@ -208,6 +208,79 @@ def test_log_food_retry_after_lapsed_refresh_logs_once(connected, refresh_expire
     assert "refresh_warning" not in result
     assert len(posts_to(connected, "food/add")) == 1
     assert len(refresh_expires_once) == 2
+
+
+DUPLICATE_BREAKFAST = """
+<html>
+<head><meta name="csrf-token" content="DUPTOKEN"></head>
+<body>
+<table>
+  <tr class="meal_header"><td>Breakfast</td></tr>
+  <tr><td><a data-food-entry-id="r1">Abbott's Light Rye</a></td></tr>
+  <tr><td><a data-food-entry-id="e9">Eggs</a></td></tr>
+  <tr><td><a data-food-entry-id="r2">Abbott's Light Rye</a></td></tr>
+</table>
+</body>
+</html>
+"""
+
+
+def test_get_day_exposes_ids_for_duplicate_names(
+    connected, local_store, make_response, monkeypatch
+):
+    monkeypatch.setattr(server.sync, "poll", lambda *args, **kwargs: None)
+    connected.session.route(
+        "GET", "food/diary?date=", make_response(text=DUPLICATE_BREAKFAST)
+    )
+    local_store.replace_diary(
+        "2026-07-08",
+        [
+            {"meal": "Breakfast", "name": "Abbott's Light Rye", "calories": 80},
+            {"meal": "Breakfast", "name": "Eggs", "calories": 70},
+            {"meal": "Breakfast", "name": "Abbott's Light Rye", "calories": 80},
+        ],
+    )
+    result = asyncio.run(server.fitness_get_day(date="2026-07-08", ctx=FakeContext()))
+    assert [
+        (row["name"], row["entry_id"], row["index"], row["calories"])
+        for row in result["diary"]
+    ] == [
+        ("Abbott's Light Rye", "r1", 1, 80.0),
+        ("Eggs", "e9", 2, 70.0),
+        ("Abbott's Light Rye", "r2", 3, 80.0),
+    ]
+    stored = local_store.diary("2026-07-08")
+    assert [row["entry_id"] for row in stored] == ["r1", "e9", "r2"]
+
+
+def test_delete_food_tool_removes_one_duplicate_by_id(connected, make_response):
+    connected.session.route(
+        "GET", "food/diary?date=", make_response(text=DUPLICATE_BREAKFAST)
+    )
+    result = asyncio.run(
+        server.fitness_delete_food(
+            entry_id="r2", meal="breakfast", date="2026-07-08", ctx=FakeContext()
+        )
+    )
+    assert result["ok"] is True
+    assert result["entry_id"] == "r2"
+    assert result["index"] == 3
+    assert posts_to(connected, "food/remove") == [
+        "https://www.myfitnesspal.com/food/remove/r2"
+    ]
+
+
+def test_delete_food_tool_ambiguous_name_removes_nothing(connected, make_response):
+    connected.session.route(
+        "GET", "food/diary?date=", make_response(text=DUPLICATE_BREAKFAST)
+    )
+    with pytest.raises(diary.AmbiguousEntry, match="entry_id=r1"):
+        asyncio.run(
+            server.fitness_delete_food(
+                query="rye", meal="breakfast", date="2026-07-08", ctx=FakeContext()
+            )
+        )
+    assert posts_to(connected, "food/remove") == []
 
 
 def test_delete_food_retry_after_lapsed_refresh_removes_once(

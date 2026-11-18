@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import functools
 import inspect
+import logging
 import os
 from collections.abc import Callable
 from typing import Any
@@ -13,6 +14,8 @@ from mcp.types import ToolAnnotations
 from . import config, diary, food_logging, mfp_client, personal, refresh, sync
 from .food_ranking import MacroTargets
 from .store import Store, trend_column
+
+logger = logging.getLogger(__name__)
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
@@ -254,6 +257,11 @@ async def fitness_get_day(date: str | None = None, ctx: Context = None) -> dict:
     """Nutrition summary, diary entries, the MyFitnessPal daily note, and the
     local feel note for a day.
 
+    Each diary entry includes entry_id (MyFitnessPal's food-entry id) and
+    index (1-based position within that meal). Two logged foods can share a
+    name; pass that entry_id, or meal plus index, to fitness_delete_food to
+    remove one of them. A row the diary page did not contain has null
+    entry_id and index.
     date: YYYY-MM-DD (default: today).
     """
     day = parse_day(date)
@@ -261,7 +269,21 @@ async def fitness_get_day(date: str | None = None, ctx: Context = None) -> dict:
     def op(store, client):
         sync.poll(store, client)
         sync.refresh_day(store, client, day)
-        return store.day_record(day.isoformat())
+        record = store.day_record(day.isoformat())
+        try:
+            doc, _token = diary.diary_page(client, day)
+        except Exception as exc:
+            if mfp_client.is_auth_error(exc):
+                raise
+            logger.warning(
+                "diary entry ids for %s were not read: %s", day.isoformat(), exc
+            )
+            return record
+        record["diary"] = diary.merge_entry_identities(
+            record["diary"], diary.diary_entries(doc)
+        )
+        store.replace_diary(day.isoformat(), record["diary"])
+        return record
 
     return await with_session(ctx, op)
 
@@ -591,22 +613,36 @@ def fitness_clear_food_pin(query: str | None = None, clear_all: bool = False) ->
 
 @write_tool
 async def fitness_delete_food(
-    query: str, meal: str | None = None, date: str | None = None, ctx: Context = None
+    query: str | None = None,
+    meal: str | None = None,
+    date: str | None = None,
+    entry_id: str | None = None,
+    index: int | None = None,
+    ctx: Context = None,
 ) -> dict:
-    """Remove a food from the MyFitnessPal diary by name match.
+    """Remove one food from the MyFitnessPal diary.
 
-    query: text matched against logged entry names (e.g. "banana"). If this
-    matches nothing, the error lists what's actually logged that day/meal — use
-    that to retry with a better query. If it matches more than one entry (and
-    none is an exact name match), the error lists the candidates; narrow `query`
-    to pick one.
+    query: text matched against logged entry names (e.g. "banana"). A single
+    match is removed. If nothing matches, the error lists what is actually
+    logged. If several entries match, nothing is removed and the error lists
+    each candidate's meal, entry_id, and index. Two entries with the same name
+    are that case — a more specific query cannot tell them apart.
+    entry_id: the food-entry id from fitness_get_day. Removes that row only.
+    meal, index, and query, when also passed, must agree with that row or
+    nothing is removed.
+    index: 1-based position of the row within `meal`, the same index
+    fitness_get_day shows. The first food in the meal is 1. Requires meal.
+    When query is also passed, the row at that index must match the query.
     meal: optional breakfast|lunch|dinner|snacks or any meal name on the
-    account, to disambiguate duplicates. date: YYYY-MM-DD (default: today).
+    account. date: YYYY-MM-DD (default: today).
+    To delete one of two identical entries, pass entry_id, or meal plus index.
     """
     day = parse_day(date)
 
     def op(store, client):
-        return diary.delete_food(client, day, query, meal)
+        return diary.delete_food(
+            client, day, query, meal, entry_id=entry_id, index=index
+        )
 
     result = await with_session(ctx, op)
     return {"ok": True, **result, **await refresh_after_write(ctx, day)}
@@ -856,7 +892,8 @@ async def fitness_bulk_export(
 ) -> dict:
     """Export a whole date range at once for analysis: per-day nutrition
     totals, food entries with macros, the MyFitnessPal daily note, and local
-    feel notes. Read-only.
+    feel notes. Read-only. Food entries include entry_id and index after
+    fitness_get_day has read that day; otherwise those fields are null.
 
     start/end: YYYY-MM-DD (default: last 30 days ending today).
     sync_first: gap-fill from MyFitnessPal before exporting. Off by default so

@@ -9,6 +9,13 @@ POST /food/load_recent and POST /food/load_most_used, which use the Rails
 csrf from GET /food/add_to_diary. Those tab calls are given a short timeout;
 if one hangs, search still returns the other sources and a warning.
 
+The BFF proxy forwards the bearer token from the NextAuth session, so once
+that cookie is logged out it answers HTTP 400 "Missing HTTP header:
+Authorization" while the Rails session still works. My Foods and saved
+meals then fall back to the legacy HTML tabs POST /food/load_my_foods and
+POST /food/load_meals, whose legacy ids /food/add accepts. Saved meals read
+that way have no components, so they are listed but not logged.
+
 /food/add rejects v2 food ids. A personal food that has a version is logged
 with POST /api/services/diary. A recipe is logged the way the recipe-logger
 modal does: POST /recipe/log_recipe with the recipe object embedded by
@@ -39,6 +46,8 @@ _RECENT_MEAL_SLOTS = ("0", "1", "2", "3")
 # is long enough for a live tab and short enough to give the rest of a search
 # back.
 _TAB_TIMEOUT = 8
+_LEGACY_MAX_PAGES = 20
+_LEGACY_MACRO_TIMEOUT = 15
 
 
 class _SourceUnavailable(Exception):
@@ -309,8 +318,178 @@ def _cap(records, limit):
     return records[:limit]
 
 
+def _legacy_rows(client, endpoint):
+    """Rows of a legacy add-to-diary HTML tab (POST /food/load_my_foods or
+    /food/load_meals).
+
+    These tabs need only the Rails session. They back up the /api/services
+    proxy, which answers HTTP 400 "Missing HTTP header: Authorization" once
+    the NextAuth session cookie is logged out. Each row carries the legacy
+    food_id and weight ids that /food/add accepts.
+    """
+    token = _rails_csrf(client)
+    url = parse.urljoin(client.BASE_URL_SECURE, endpoint)
+    headers = diary.api_headers(
+        client,
+        {
+            "Accept": "text/html, */*; q=0.01",
+            "X-CSRF-Token": token,
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        },
+    )
+    rows = []
+    seen = set()
+    for page in range(1, _LEGACY_MAX_PAGES + 1):
+        try:
+            resp = client.session.post(
+                url,
+                data={"meal": "0", "base_index": str(len(rows)), "page": str(page)},
+                headers=headers,
+                timeout=_TAB_TIMEOUT,
+            )
+            resp.raise_for_status()
+        except Exception as exc:
+            _raise_unless_auth(exc, f"POST /{endpoint}")
+        if not resp.text.strip():
+            break
+        doc = lh.fromstring(resp.text)
+        added = 0
+        for row in doc.xpath("//tr[contains(@class, 'favorite')]"):
+            boxes = row.xpath(".//input[@data-food-id]")
+            cells = row.xpath("./td")
+            if not boxes or len(cells) < 2:
+                continue
+            food_id = _json_id(boxes[0].get("data-food-id"))
+            name = _blank_to_none(cells[1].text_content())
+            if food_id is None or name is None or food_id in seen:
+                continue
+            seen.add(food_id)
+            added += 1
+            options = [
+                (_json_id(opt.get("value")), _blank_to_none(opt.text_content()))
+                for opt in row.xpath(".//select//option")
+            ]
+            rows.append({"food_id": food_id, "name": name, "options": options})
+        if not added or not doc.xpath("//a[contains(@class, 'next_page')]"):
+            break
+    return rows
+
+
+def _legacy_record(row, source):
+    servings = [
+        {
+            "id": weight_id,
+            "value": None,
+            "unit": None,
+            "nutrition_multiplier": None,
+            "label": label,
+        }
+        for weight_id, label in row["options"]
+        if weight_id is not None
+    ]
+    return {
+        "source": source,
+        "name": row["name"],
+        "brand": None,
+        "calories": None,
+        "protein": None,
+        "carbs": None,
+        "fat": None,
+        "serving": servings[0]["label"] if servings else None,
+        "servings": servings,
+        "verified": None,
+        "food_id": row["food_id"],
+        "weight_id": servings[0]["id"] if servings else None,
+        "version": None,
+        "meal_id": None,
+        "recipe_id": None,
+        "quantity": None,
+    }
+
+
+def _legacy_food_macros(client):
+    """Macros for My Foods from the JSON tab, keyed by "brand - name".
+
+    That tab is slow (about 8 s) and its ids are v2 ids /food/add rejects, so
+    it only fills in numbers; any failure leaves them blank.
+    """
+    try:
+        token = _rails_csrf(client)
+        resp = client.session.post(
+            parse.urljoin(client.BASE_URL_SECURE, "food/load_my_foods"),
+            data={"meal": "0", "base_index": "0", "page": "1"},
+            headers=diary.api_headers(
+                client,
+                {
+                    "Accept": "application/json",
+                    "X-CSRF-Token": token,
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                },
+            ),
+            timeout=_LEGACY_MACRO_TIMEOUT,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return {}
+    by_name = {}
+    for raw in _as_list(payload):
+        record = _food_record(raw, "my_food")
+        if record is None:
+            continue
+        label = " - ".join(part for part in (record["brand"], record["name"]) if part)
+        by_name[normalize_query(label)] = record
+    return by_name
+
+
+def _legacy_my_foods(client):
+    macros = _legacy_food_macros(client)
+    records = []
+    for row in _legacy_rows(client, "food/load_my_foods"):
+        record = _legacy_record(row, "my_food")
+        match = macros.get(normalize_query(record["name"]))
+        if match is not None:
+            for key in ("brand", "calories", "protein", "carbs", "fat", "verified"):
+                record[key] = match[key]
+            if len(match["servings"]) == len(record["servings"]):
+                for legacy, rich in zip(
+                    record["servings"], match["servings"], strict=True
+                ):
+                    for key in ("value", "unit", "nutrition_multiplier"):
+                        legacy[key] = rich[key]
+        records.append(record)
+    return records
+
+
+def _legacy_my_meals(client):
+    meals = []
+    for row in _legacy_rows(client, "food/load_meals"):
+        record = _legacy_record(row, "my_meal")
+        # The legacy tab has no components, so log_saved_meal refuses to log
+        # this meal rather than guess at its foods.
+        record["meal_id"] = record["food_id"]
+        record["food_id"] = None
+        record["weight_id"] = None
+        record["foods"] = []
+        meals.append(record)
+    return meals
+
+
+def _bff_or_legacy(client, path, params, legacy):
+    try:
+        return _bff_get(client, path, params), None
+    except Exception as exc:
+        if mfp_client.is_auth_error(exc):
+            raise
+        return None, legacy(client)
+
+
 def list_my_foods(client, search="", limit=50):
-    payload = _bff_get(client, "api/services/users/foods/mine", {"search": search})
+    payload, legacy = _bff_or_legacy(
+        client, "api/services/users/foods/mine", {"search": search}, _legacy_my_foods
+    )
+    if legacy is not None:
+        return _cap([r for r in legacy if _list_hit(r["name"], search)], limit)
     records = []
     for raw in _as_list(payload):
         record = _food_record(raw, "my_food")
@@ -345,9 +524,14 @@ def _sum_macro(foods, key):
 
 
 def list_my_meals(client, search="", limit=50):
-    payload = _bff_get(
-        client, "api/services/users/meals/mine", {"limit": 100, "search": search}
+    payload, legacy = _bff_or_legacy(
+        client,
+        "api/services/users/meals/mine",
+        {"limit": 100, "search": search},
+        _legacy_my_meals,
     )
+    if legacy is not None:
+        return _cap([r for r in legacy if _list_hit(r["name"], search)], limit)
     meals = []
     for raw in _as_list(payload):
         meal = _unwrap(raw)

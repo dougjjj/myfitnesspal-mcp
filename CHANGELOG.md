@@ -28,6 +28,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `fitness_get_day` diary entries, and the result of `fitness_delete_food`,
+  include `entry_id` and `index` (1-based position within the meal).
+  `fitness_bulk_export` includes the same fields; they are null until
+  `fitness_get_day` has read that day. Callers that ignore unknown fields
+  keep working. `fitness_delete_food(query=...)` still removes a single
+  name match.
+- An ambiguous food or exercise name lists each candidate's `entry_id`
+  (and, for food, its meal and `index`). `fitness_delete_exercise(all_matches=True)`
+  still removes every matching exercise row.
 - `fitness_search_food` checks My Foods, saved meals, recipes, recent foods,
   and frequent foods before the public database. Each result has `source`
   (`my_food`, `my_meal`, `my_recipe`, `recent`, `frequent`, or `public`).
@@ -53,6 +62,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `fitness_delete_food` can remove one of two diary entries that share a
+  name. Pass `entry_id` from `fitness_get_day`, or `meal` plus `index`.
+  A name that matches several entries deletes nothing and lists each
+  candidate's meal, `entry_id`, and `index`.
+- My Foods and saved meals fall back to the legacy add-to-diary tabs
+  (`POST /food/load_my_foods` and `POST /food/load_meals`) when
+  `/api/services` answers HTTP 400 because the NextAuth session cookie is
+  logged out. Search still returns those foods. A saved meal read this way
+  has no components, so it is listed but not logged.
 - `fitness_log_food(recipe_id=...)` submits the recipe through MyFitnessPal's
   recipe logger (`POST /recipe/log_recipe`) using the recipe object on the
   view page. A recipe with no food id can be logged. `quantity` is still how
